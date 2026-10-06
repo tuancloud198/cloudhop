@@ -1,3 +1,21 @@
 from django.contrib import admin
 
-# Register your models here.
+from accounts.models import Account
+
+
+@admin.register(Account)
+class AccountAdmin(admin.ModelAdmin):
+    list_display = (
+        "id",
+        "name",
+        "provider",
+        "external_id",
+        "project_id",
+        "credential_ref",
+        "added_at",
+        "updated_at",
+        "is_valid",
+        "is_active",
+    )
+    list_filter = ("id", "name", "provider", "external_id", "credential_ref")
+

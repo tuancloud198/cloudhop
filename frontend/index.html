@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='%232563eb' d='M6.5 19a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 17.5 8.5a5 5 0 0 1 .5 10.5z'/></svg>" />
+    <title>CloudHop</title>
+    <script>
+      // Apply the saved theme before first paint so the page does not flash (see src/theme.js)
+      try {
+        const theme = localStorage.getItem('cloudhop-theme')
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

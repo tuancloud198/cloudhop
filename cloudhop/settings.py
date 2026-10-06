@@ -27,6 +27,9 @@ DEBUG = True
 
 ALLOWED_HOSTS = []
 
+# The Vue dev server (frontend/) proxies /api here; its origin must pass the CSRF check
+CSRF_TRUSTED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+
 
 # Application definition
 
@@ -37,6 +40,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'accounts',
+    'clusters',
+    'kubernetes',
+    'moves'
 ]
 
 MIDDLEWARE = [
@@ -71,6 +79,12 @@ WSGI_APPLICATION = 'cloudhop.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
+
+# Primary key used by every model that does not declare one
+DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# Where uploaded cloud credential files are stored (kept out of git)
+CREDENTIALS_DIR = BASE_DIR / "credentials"
 
 DATABASES = {
     'default': {
