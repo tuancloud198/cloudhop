@@ -24,6 +24,21 @@ export function dateTime(value) {
   return value ? absolute.format(new Date(value)) : ''
 }
 
+// A date without time (YYYY-MM-DD), shown as the same calendar day in every time zone
+const dayOnly = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeZone: 'UTC' })
+
+export function date(value) {
+  return value ? dayOnly.format(new Date(`${value}T00:00:00Z`)) : ''
+}
+
+// value: number or decimal string from the API; currency: ISO code, may be empty
+export function money(value, currency) {
+  if (value === null || value === undefined || value === '') return '–'
+  const number = Number(value)
+  if (!currency) return number.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return number.toLocaleString(undefined, { style: 'currency', currency })
+}
+
 export function apiVersion(resource) {
   return resource.group ? `${resource.group}/${resource.version}` : resource.version
 }

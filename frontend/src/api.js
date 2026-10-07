@@ -76,4 +76,10 @@ export const api = {
   listResources: (clusterId, params) => request('GET', `/clusters/${clusterId}/resources/`, { params }),
   resourceSummary: (clusterId) => request('GET', `/clusters/${clusterId}/resources/summary/`),
   syncResources: (clusterId) => request('POST', `/clusters/${clusterId}/resources/sync/`),
+
+  getBilling: (accountId) => request('GET', `/accounts/${accountId}/billing/`),
+  // Also returns warnings (what could not be read) and received (notifications stored)
+  syncBilling: (accountId) => request('POST', `/accounts/${accountId}/billing/sync/`),
+  // data: {pubsub_subscription}
+  updateBillingAccount: (id, data) => request('PATCH', `/billing-accounts/${id}/`, { body: data }),
 }

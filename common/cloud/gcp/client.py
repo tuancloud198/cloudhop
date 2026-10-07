@@ -37,9 +37,19 @@ class GCPClient:
 
         Raises InvalidCredential if authentication fails, error_cls for any other failure.
         """
+        return self._request("GET", url, None, error_cls)
+
+    def post(self, url: str, body: dict, error_cls: type[CloudAPIError] = CloudAPIError) -> dict:
+        """POST a JSON body to a URL (formatted with project_id) and return the JSON body.
+
+        Raises InvalidCredential if authentication fails, error_cls for any other failure.
+        """
+        return self._request("POST", url, body, error_cls)
+
+    def _request(self, method: str, url: str, body: dict | None, error_cls: type[CloudAPIError]) -> dict:
         try:
             session = AuthorizedSession(self._credentials())
-            response = session.get(url.format(project_id=self.project_id), timeout=10)
+            response = session.request(method, url.format(project_id=self.project_id), json=body, timeout=10)
         except (GoogleAuthError, ValueError) as exc:
             logger.warning("GCP auth failed for project %s: %s", self.project_id, exc)
             raise InvalidCredential(f"GCP authentication failed: {exc}")
@@ -49,8 +59,8 @@ class GCPClient:
 
         if response.status_code != 200:
             logger.warning(
-                "GCP request %s failed for project %s: %s %s",
-                url, self.project_id, response.status_code, response.text[:200],
+                "GCP request %s %s failed for project %s: %s %s",
+                method, url, self.project_id, response.status_code, response.text[:200],
             )
             raise error_cls(self._error_reason(response))
 
@@ -69,5 +79,5 @@ class GCPClient:
         if response.status_code == 403:
             return f"permission denied on GCP project {self.project_id}: {message}"
         if response.status_code == 404:
-            return f"GCP project {self.project_id} not found"
+            return f"not found on GCP (project {self.project_id}): {message}"
         return f"GCP returned {response.status_code} for project {self.project_id}: {message}"

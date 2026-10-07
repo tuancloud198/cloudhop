@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
+import BillingCard from '../components/BillingCard.vue'
 import ProviderLogo from '../components/ProviderLogo.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { accounts } from '../accounts.js'
@@ -168,6 +169,8 @@ function machineTypes(cluster) {
           </table>
         </div>
       </section>
+
+      <BillingCard :account="account" />
     </template>
   </div>
 </template>
