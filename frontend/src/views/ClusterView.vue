@@ -43,6 +43,10 @@ const account = computed(() => cluster.value && accounts.find(cluster.value.acco
 const totalStored = computed(() => summary.value.kinds.reduce((sum, item) => sum + item.count, 0))
 const hasFilters = computed(() => kind.value !== null || namespace.value !== null || search.value !== '')
 const pageEnd = computed(() => Math.min(offset.value + PAGE_SIZE, total.value))
+// The guide explains how to grant Secret access on GKE
+const secretsSkipped = computed(
+  () => account.value?.provider === 'gcp' && skipped.value.some((item) => !item.group && item.kind === 'Secret'),
+)
 
 watch(
   () => props.id,
@@ -235,6 +239,9 @@ function memory(mb) {
               <strong>{{ item.kind }}</strong> — {{ item.reason }}
             </li>
           </ul>
+          <RouterLink v-if="secretsSkipped" :to="{ name: 'guide', hash: '#gcp-secrets' }">
+            How to let CloudHop read Secrets on GKE
+          </RouterLink>
         </div>
       </div>
 

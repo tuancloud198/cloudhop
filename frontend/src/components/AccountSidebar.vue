@@ -56,6 +56,10 @@ defineEmits(['add', 'navigate'])
     </nav>
 
     <footer class="footer">
+      <RouterLink :to="{ name: 'guide' }" class="guide-link" @click="$emit('navigate')">
+        <AppIcon name="book" :size="16" />
+        Guide
+      </RouterLink>
       <ThemeSwitch />
     </footer>
   </aside>
@@ -107,8 +111,30 @@ defineEmits(['add', 'navigate'])
 }
 
 .footer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   padding: 12px;
   border-top: 1px solid var(--border);
+}
+
+.guide-link {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--text);
+  font-weight: 500;
+}
+
+.guide-link:hover {
+  background: var(--surface-muted);
+  text-decoration: none;
+}
+
+.guide-link.router-link-active {
+  background: var(--primary-soft);
 }
 
 .note {

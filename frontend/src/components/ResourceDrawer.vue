@@ -10,10 +10,19 @@ const emit = defineEmits(['close'])
 
 const tab = ref('manifest')
 const copied = ref(false)
+const revealed = ref(false)
+
+const isSecret = computed(
+  () => props.resource && !props.resource.group && props.resource.kind === 'Secret',
+)
+const canReveal = computed(
+  () => isSecret.value && tab.value === 'manifest' && Object.keys(props.resource.manifest?.data || {}).length > 0,
+)
 
 const text = computed(() => {
   if (!props.resource) return ''
-  const value = tab.value === 'manifest' ? props.resource.manifest : props.resource.status
+  let value = tab.value === 'manifest' ? props.resource.manifest : props.resource.status
+  if (canReveal.value && revealed.value) value = decodeSecret(value)
   return value && Object.keys(value).length ? stringify(value) : ''
 })
 
@@ -22,8 +31,41 @@ watch(
   () => {
     tab.value = 'manifest'
     copied.value = false
+    revealed.value = false
   },
 )
+
+// Move base64 `data` values into `stringData` as plain text, so the YAML stays applicable.
+// Values that are not valid UTF-8 (binary keys, certificates in DER, ...) stay in `data`.
+function decodeSecret(manifest) {
+  const data = {}
+  const stringData = { ...manifest.stringData }
+  for (const [key, encoded] of Object.entries(manifest.data)) {
+    const decoded = decodeBase64(encoded)
+    if (decoded === null) data[key] = encoded
+    else stringData[key] = decoded
+  }
+  const result = {}
+  for (const [key, value] of Object.entries(manifest)) {
+    if (key === 'stringData') continue
+    if (key !== 'data') {
+      result[key] = value
+      continue
+    }
+    if (Object.keys(data).length) result.data = data
+    result.stringData = stringData
+  }
+  return result
+}
+
+function decodeBase64(encoded) {
+  try {
+    const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return null
+  }
+}
 
 async function copy() {
   await navigator.clipboard.writeText(text.value)
@@ -63,6 +105,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <button :class="{ active: tab === 'manifest' }" @click="tab = 'manifest'">Manifest</button>
           <button :class="{ active: tab === 'status' }" @click="tab = 'status'">Status</button>
           <span class="spacer" />
+          <button v-if="canReveal" class="btn btn-sm" :aria-pressed="revealed" @click="revealed = !revealed">
+            <AppIcon :name="revealed ? 'eye-off' : 'eye'" :size="13" />
+            {{ revealed ? 'Hide values' : 'Decode values' }}
+          </button>
           <button class="btn btn-sm" :disabled="!text" @click="copy">
             <AppIcon :name="copied ? 'check' : 'copy'" :size="13" />
             {{ copied ? 'Copied' : 'Copy YAML' }}

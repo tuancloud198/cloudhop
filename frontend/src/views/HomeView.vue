@@ -20,6 +20,10 @@ defineEmits(['add-account'])
           <AppIcon name="plus" :size="14" />
           Add account
         </button>
+        <p class="hint">
+          First time? The <RouterLink :to="{ name: 'guide' }">guide</RouterLink> explains how to prepare a service
+          account.
+        </p>
       </template>
     </div>
   </div>
@@ -41,5 +45,10 @@ defineEmits(['add-account'])
 .welcome p {
   max-width: 420px;
   margin: 0 0 12px;
+}
+
+.welcome .hint {
+  margin: 8px 0 0;
+  font-size: 13px;
 }
 </style>

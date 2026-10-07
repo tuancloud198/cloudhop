@@ -2,6 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 import AccountView from './views/AccountView.vue'
 import ClusterView from './views/ClusterView.vue'
+import GuideView from './views/GuideView.vue'
 import HomeView from './views/HomeView.vue'
 
 export const router = createRouter({
@@ -10,6 +11,7 @@ export const router = createRouter({
     { path: '/', name: 'home', component: HomeView },
     { path: '/accounts/:id(\\d+)', name: 'account', component: AccountView, props: true },
     { path: '/clusters/:id(\\d+)', name: 'cluster', component: ClusterView, props: true },
+    { path: '/guide', name: 'guide', component: GuideView },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

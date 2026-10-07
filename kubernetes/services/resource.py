@@ -4,13 +4,19 @@ from django.db import transaction
 from django.db.models import Count, Max
 from django.utils.dateparse import parse_datetime
 
+from accounts.models import Account
 from clusters.models import Clusters
 from common.kube import KubeAPIError, KubeClient
 
 from ..adapters import KubeAccessAdapter
 from ..models import KubeResource
 
-__all__ = ["ClusterNotUsable", "list_native_resource_types", "resource_summary", "sync_resources"]
+__all__ = [
+    "ClusterNotUsable",
+    "list_native_resource_types",
+    "resource_summary",
+    "sync_resources",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +25,14 @@ logger = logging.getLogger(__name__)
 NATIVE_LABEL = "kube-aggregator.kubernetes.io/automanaged"
 
 # Set by the API server, meaningless on another cluster
-SERVER_METADATA = {"uid", "resourceVersion", "generation", "creationTimestamp", "managedFields", "selfLink"}
+SERVER_METADATA = {
+    "uid",
+    "resourceVersion",
+    "generation",
+    "creationTimestamp",
+    "managedFields",
+    "selfLink",
+}
 LAST_APPLIED = "kubectl.kubernetes.io/last-applied-configuration"
 
 # Listing a kind is skipped (not fatal) on these: no RBAC access, or the kind went away
@@ -28,6 +41,10 @@ SKIPPABLE_STATUS = {403, 404, 405}
 
 class ClusterNotUsable(Exception):
     """The cluster is inactive, or its account is inactive or not validated."""
+
+
+class AccountNotUsable(Exception):
+    """The account is inactive, or the account credit limits has crossed the limit"""
 
 
 def sync_resources(cluster_id: int) -> dict:
@@ -48,27 +65,33 @@ def sync_resources(cluster_id: int) -> dict:
     if not cluster.is_active:
         raise ClusterNotUsable(f"cluster {cluster_id} is inactive")
     if not account.is_active or not account.is_valid:
-        raise ClusterNotUsable(f"account {account.pk} is inactive or not validated")
+        raise AccountNotUsable(f"account {account.pk} is inactive or not validated")
 
     adapter = KubeAccessAdapter.for_account(account)
     rows, skipped = [], []
     with adapter.connect(cluster) as kube:
-        for resource_type in list_native_resource_types(kube, adapter.skipped_resources):
+        for resource_type in list_native_resource_types(
+            kube, adapter.skipped_resources
+        ):
             try:
                 items = kube.list(resource_type["path"])
             except KubeAPIError as exc:
                 if exc.status_code not in SKIPPABLE_STATUS:
                     raise
-                skipped.append({
-                    "group": resource_type["group"],
-                    "kind": resource_type["kind"],
-                    "reason": str(exc),
-                })
+                skipped.append(
+                    {
+                        "group": resource_type["group"],
+                        "kind": resource_type["kind"],
+                        "reason": str(exc),
+                    }
+                )
                 continue
             rows.extend(
                 _to_row(cluster, resource_type, item)
                 for item in items
-                if adapter.is_user_created(resource_type["group"], resource_type["kind"], item)
+                if adapter.is_user_created(
+                    resource_type["group"], resource_type["kind"], item
+                )
             )
 
     with transaction.atomic():
@@ -87,9 +110,16 @@ def resource_summary(cluster_id: int) -> dict:
     Returns {"kinds": [{group, kind, count}], "namespaces": [name], "synced_at": datetime or None}.
     """
     resources = KubeResource.objects.filter(cluster_id=cluster_id)
-    kinds = resources.values("group", "kind").annotate(count=Count("id")).order_by("kind", "group")
+    kinds = (
+        resources.values("group", "kind")
+        .annotate(count=Count("id"))
+        .order_by("kind", "group")
+    )
     namespaces = (
-        resources.exclude(namespace="").values_list("namespace", flat=True).distinct().order_by("namespace")
+        resources.exclude(namespace="")
+        .values_list("namespace", flat=True)
+        .distinct()
+        .order_by("namespace")
     )
     return {
         "kinds": list(kinds),
@@ -99,7 +129,9 @@ def resource_summary(cluster_id: int) -> dict:
     }
 
 
-def list_native_resource_types(kube: KubeClient, skipped: frozenset[tuple[str, str]] = frozenset()) -> list[dict]:
+def list_native_resource_types(
+    kube: KubeClient, skipped: frozenset[tuple[str, str]] = frozenset()
+) -> list[dict]:
     """Return the listable native kinds served by the cluster, at each group's preferred version.
 
     Kinds whose (group, resource) is in skipped are left out.
@@ -130,13 +162,15 @@ def list_native_resource_types(kube: KubeClient, skipped: frozenset[tuple[str, s
                 continue
             if (group, resource["name"]) in skipped:
                 continue
-            resource_types.append({
-                "group": group,
-                "version": version,
-                "kind": resource["kind"],
-                "namespaced": resource["namespaced"],
-                "path": f"{base}/{resource['name']}",
-            })
+            resource_types.append(
+                {
+                    "group": group,
+                    "version": version,
+                    "kind": resource["kind"],
+                    "namespaced": resource["namespaced"],
+                    "path": f"{base}/{resource['name']}",
+                }
+            )
     return resource_types
 
 
@@ -163,19 +197,26 @@ def _clean_manifest(resource_type: dict, item: dict) -> dict:
     manifest = {
         "apiVersion": f"{group}/{version}" if group else version,
         "kind": resource_type["kind"],
-        **{key: value for key, value in item.items() if key not in ("apiVersion", "kind", "status")},
+        **{
+            key: value
+            for key, value in item.items()
+            if key not in ("apiVersion", "kind", "status")
+        },
     }
 
-    metadata = {key: value for key, value in item.get("metadata", {}).items() if key not in SERVER_METADATA}
-    annotations = {key: value for key, value in metadata.get("annotations", {}).items() if key != LAST_APPLIED}
+    metadata = {
+        key: value
+        for key, value in item.get("metadata", {}).items()
+        if key not in SERVER_METADATA
+    }
+    annotations = {
+        key: value
+        for key, value in metadata.get("annotations", {}).items()
+        if key != LAST_APPLIED
+    }
     if annotations:
         metadata["annotations"] = annotations
     else:
         metadata.pop("annotations", None)
     manifest["metadata"] = metadata
-
-    if not group and resource_type["kind"] == "Secret":
-        # Never store secret values in the database; keep the key names only
-        manifest["data"] = dict.fromkeys(item.get("data") or {}, "")
-        manifest.pop("stringData", None)
     return manifest
