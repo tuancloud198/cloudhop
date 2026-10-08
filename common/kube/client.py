@@ -1,3 +1,4 @@
+import json
 import logging
 import tempfile
 
@@ -19,7 +20,7 @@ class KubeAPIError(CloudAPIError):
 
 
 class KubeClient:
-    """Calls a Kubernetes API server with a bearer token.
+    """Calls a Kubernetes API server with a bearer token. Reads, plus the few writes moves need.
 
     Use as a context manager: the CA certificate is written to a temp file for
     the lifetime of the client, since requests only verifies against a file.
@@ -48,16 +49,35 @@ class KubeClient:
 
         Raises KubeAPIError if the call fails.
         """
+        return self._request("GET", path, params=params)
+
+    def post(self, path: str, body: dict) -> dict:
+        """Create the object in body under a collection path and return it.
+
+        Raises KubeAPIError if the call fails; status_code 409 when it already exists.
+        """
+        return self._request("POST", path, json=body)
+
+    def patch(self, path: str, body: dict) -> dict:
+        """Merge body into the object at path (JSON merge patch) and return it.
+
+        Raises KubeAPIError if the call fails.
+        """
+        return self._request(
+            "PATCH", path, data=json.dumps(body), headers={"Content-Type": "application/merge-patch+json"}
+        )
+
+    def _request(self, method: str, path: str, **kwargs) -> dict:
         try:
-            response = self._session.get(f"{self.endpoint}{path}", params=params, timeout=30)
+            response = self._session.request(method, f"{self.endpoint}{path}", timeout=30, **kwargs)
         except requests.RequestException as exc:
             logger.warning("Cannot reach Kubernetes API %s: %s", self.endpoint, exc)
             raise KubeAPIError(f"cannot reach Kubernetes API at {self.endpoint}")
 
-        if response.status_code != 200:
+        if response.status_code not in (200, 201):
             logger.warning(
-                "Kubernetes request %s failed: %s %s",
-                path, response.status_code, response.text[:200],
+                "Kubernetes request %s %s failed: %s %s",
+                method, path, response.status_code, response.text[:200],
             )
             raise KubeAPIError(self._error_reason(path, response), response.status_code)
 

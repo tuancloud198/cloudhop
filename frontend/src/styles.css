@@ -112,6 +112,11 @@ pre,
   background: var(--surface-muted);
 }
 
+/* A RouterLink styled as a button */
+a.btn:hover {
+  text-decoration: none;
+}
+
 .btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;

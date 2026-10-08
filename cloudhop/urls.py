@@ -23,4 +23,5 @@ urlpatterns = [
     path("api/v1/", include("clusters.urls")),
     path("api/v1/", include("kubernetes.urls")),
     path("api/v1/", include("billing.urls")),
+    path("api/v1/", include("moves.urls")),
 ]

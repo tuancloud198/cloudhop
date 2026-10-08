@@ -1,16 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600" role="img" aria-labelledby="title desc">
   <title id="title">CloudHop architecture</title>
-  <desc id="desc">The browser loads the UI from nginx, which forwards the API to Django. Celery beat queues syncs through Redis for the Celery worker. Django and the worker run the same sync services, store data in PostgreSQL, and call Google Cloud: project and billing APIs, the GKE API, each cluster's Kubernetes API, and the Pub/Sub subscription that receives budget notifications. Planned: moves back up volume data with Velero into a bucket in the target account and restore it in the target cluster.</desc>
+  <desc id="desc">The browser loads the UI from nginx, which forwards the API to Django. Celery beat queues syncs through Redis for the Celery worker. Django and the worker run the same sync services, store data in PostgreSQL, and call Google Cloud: project and billing APIs, the GKE API, each cluster's Kubernetes API, and the Pub/Sub subscription that receives budget notifications. Moves scale the source down, back up its namespaces with Velero into a bucket in the target account, restore them in the target cluster, and scale them up.</desc>
   <defs>
     <style>
       :root {
         --bg: #ffffff; --box: #f6f7f9; --stroke: #c9ced6; --text: #1a1d23; --muted: #626b78;
-        --compose: #2563eb; --cloud: #15803d; --planned: #b45309; --edge: #626b78;
+        --compose: #2563eb; --cloud: #15803d; --moves: #b45309; --edge: #626b78;
       }
       @media (prefers-color-scheme: dark) {
         :root {
           --bg: #0f1115; --box: #171a20; --stroke: #3a404b; --text: #e6e8ec; --muted: #9aa3b2;
-          --compose: #4f86f7; --cloud: #4cc27a; --planned: #e3a33f; --edge: #9aa3b2;
+          --compose: #4f86f7; --cloud: #4cc27a; --moves: #e3a33f; --edge: #9aa3b2;
         }
       }
       text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
@@ -25,10 +25,9 @@
       .compose-label { fill: var(--compose); }
       .cloud { stroke: var(--cloud); }
       .cloud-label { fill: var(--cloud); }
-      .planned { stroke: var(--planned); stroke-dasharray: 6 4; }
-      .planned-label { fill: var(--planned); }
+      .moves { stroke: var(--moves); }
+      .moves-label { fill: var(--moves); }
       .edge { stroke: var(--edge); stroke-width: 1.5; fill: none; }
-      .edge.dashed { stroke-dasharray: 5 4; }
       .head { fill: var(--edge); }
     </style>
     <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
@@ -70,11 +69,11 @@
 
   <rect class="box" x="525" y="240" width="120" height="64" rx="8" />
   <text class="t" x="585" y="266">celery-worker</text>
-  <text class="s" x="585" y="284">the scheduled syncs</text>
+  <text class="s" x="585" y="284">syncs and moves</text>
 
   <rect class="box" x="215" y="350" width="430" height="60" rx="8" />
   <text class="t" x="430" y="374">Sync services</text>
-  <text class="s" x="430" y="393">accounts · clusters · kubernetes · billing, via provider adapters</text>
+  <text class="s" x="430" y="393">accounts · clusters · kubernetes · billing · moves</text>
 
   <path class="edge" d="M170,86 L213,86" marker-end="url(#arrow)" />
   <path class="edge" d="M275,112 L275,158" marker-end="url(#arrow)" />
@@ -115,17 +114,17 @@
 
   <path class="edge" d="M840,310 L840,344" marker-end="url(#arrow)" />
 
-  <!-- Planned: moves -->
-  <rect class="group planned" x="20" y="450" width="960" height="130" rx="12" />
-  <text class="group-label planned-label" x="40" y="476">PLANNED · MOVES</text>
+  <!-- Moves -->
+  <rect class="group moves" x="20" y="450" width="960" height="130" rx="12" />
+  <text class="group-label moves-label" x="40" y="476">MOVES · CUTOVER</text>
 
   <rect class="box" x="40" y="492" width="160" height="64" rx="8" />
-  <text class="t" x="120" y="518">Budget running low</text>
-  <text class="s" x="120" y="536">spend_status()</text>
+  <text class="t" x="120" y="518">Check, scale down</text>
+  <text class="s" x="120" y="536">source workloads to 0</text>
 
   <rect class="box" x="230" y="492" width="160" height="64" rx="8" />
   <text class="t" x="310" y="518">Velero backup</text>
-  <text class="s" x="310" y="536">PVC data, source cluster</text>
+  <text class="s" x="310" y="536">objects + volume data</text>
 
   <rect class="box" x="420" y="492" width="160" height="64" rx="8" />
   <text class="t" x="500" y="518">Object bucket</text>
@@ -133,14 +132,14 @@
 
   <rect class="box" x="610" y="492" width="160" height="64" rx="8" />
   <text class="t" x="690" y="518">Velero restore</text>
-  <text class="s" x="690" y="536">new PVCs, target cluster</text>
+  <text class="s" x="690" y="536">in the target cluster</text>
 
   <rect class="box" x="800" y="492" width="160" height="64" rx="8" />
-  <text class="t" x="880" y="518">Apply manifests</text>
-  <text class="s" x="880" y="536">stored compute objects</text>
+  <text class="t" x="880" y="518">Scale up, verify</text>
+  <text class="s" x="880" y="536">replicas the source had</text>
 
-  <path class="edge dashed" d="M200,524 L228,524" marker-end="url(#arrow)" />
-  <path class="edge dashed" d="M390,524 L418,524" marker-end="url(#arrow)" />
-  <path class="edge dashed" d="M580,524 L608,524" marker-end="url(#arrow)" />
-  <path class="edge dashed" d="M770,524 L798,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M200,524 L228,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M390,524 L418,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M580,524 L608,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M770,524 L798,524" marker-end="url(#arrow)" />
 </svg>

@@ -84,4 +84,11 @@ export const api = {
     request('POST', `/accounts/${accountId}/billing/sync/`, { body: { replay } }),
   // data: {pubsub_subscription}
   updateBillingAccount: (id, data) => request('PATCH', `/billing-accounts/${id}/`, { body: data }),
+
+  listMoves: () => request('GET', '/moves/'),
+  getMove: (id) => request('GET', `/moves/${id}/`),
+  // data: {source_cluster, target_cluster, namespaces, mode, storage_class_mapping, storage_location}
+  createMove: (data) => request('POST', '/moves/', { body: data }),
+  cancelMove: (id) => request('POST', `/moves/${id}/cancel/`),
+  retryMove: (id) => request('POST', `/moves/${id}/retry/`),
 }

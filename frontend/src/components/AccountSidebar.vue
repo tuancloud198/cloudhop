@@ -56,6 +56,10 @@ defineEmits(['add', 'navigate'])
     </nav>
 
     <footer class="footer">
+      <RouterLink :to="{ name: 'moves' }" class="guide-link" @click="$emit('navigate')">
+        <AppIcon name="move" :size="16" />
+        Moves
+      </RouterLink>
       <RouterLink :to="{ name: 'guide' }" class="guide-link" @click="$emit('navigate')">
         <AppIcon name="book" :size="16" />
         Guide

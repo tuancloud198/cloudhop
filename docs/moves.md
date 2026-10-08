@@ -1,139 +1,73 @@
-# Moves: design
+# Moves
 
-Status: proposal. Nothing here is built yet.
+A **move** copies namespaces from a source cluster to a target cluster in another account, with every object and the data of their volumes, so the workloads keep running when the source account's credits run out.
 
-A **move** copies the workloads of one or more namespaces from a source cluster to a target cluster in another account, with their data, so they keep running when the source account's credits run out.
+[Velero](https://velero.io) does the copy, through a Cloud Storage bucket in the target account. CloudHop starts each step, scales the workloads down and up for a cutover, and checks the result. It runs on Google Cloud (GKE to GKE); other providers come later.
 
-CloudHop already stores every user-created object of a cluster as a clean manifest. That covers the compute side (Deployments, Services, ConfigMaps, Secrets, ...): those can be applied to another cluster. What it cannot do is move the data in PersistentVolumeClaims. This design adds that with [Velero](https://velero.io), and the steps around it.
+Setting up Velero is described in the Guide, under *Moving namespaces*.
 
-## Scope
+## Why Velero, and why a bucket
 
-First version:
-
-- GKE to GKE, across accounts (GCP projects with separate billing accounts).
-- The user starts a move and confirms the cutover.
-- Velero is installed in both clusters by the user, following the Guide; CloudHop checks it is there.
-
-Later:
-
-- Moves to and from other providers (AWS, Azure), once they are supported. The data path below already works across providers.
-- Starting the backup automatically when a budget runs low (see [Triggering](#triggering)).
-- CloudHop installing Velero itself.
-
-## Moving the data
-
-### Options considered
-
-| Option | Why not, or not first |
+| Option | Verdict |
 |---|---|
-| **Velero, CSI snapshot data mover** | Chosen. Copies volume data through an object bucket, so the source and target only need to reach the bucket, not each other, and the target can use any storage class or provider. Driven entirely through Kubernetes objects, which CloudHop already talks to. |
-| pv-migrate (rsync between clusters) | Needs both clusters up and reachable from each other at the same time, and gives no copy to fall back on. Good for a quick proof of concept. |
-| GCP disk snapshots shared across projects | Fastest for large disks, but GCP only, and CloudHop would have to create disks and static PVs itself. |
-| Kasten K10 | Commercial; no gain over Velero for this. |
+| **Velero with the CSI snapshot data mover** | Chosen. It backs up every Kubernetes object of the namespaces and copies the volumes' files into a bucket; its restore recreates both in another cluster. It already handles what a new cluster needs: Services get new cluster IPs, PVCs bind to new volumes, objects are restored in a safe order, and custom resources move too. |
+| pv-migrate (rsync between clusters) | Copies volumes only, needs both clusters reachable from each other at once, and keeps no copy to fall back on. |
+| GCP disk snapshots shared across projects | GCP only, and CloudHop would have to recreate disks, PVs and every other object itself. |
+| Applying CloudHop's stored manifests | Covers built-in kinds only (no custom resources), and every manifest would need rewriting for the new cluster. |
 
-Databases are the exception: a volume copy of a running database is crash-consistent at best. Cutover mode (below) stops the workloads first, which makes the copy consistent. A copy taken while a database runs should use the database's own dump or replication instead.
+Velero cannot copy from one cluster straight into another: the source writes the backup to object storage and the target reads it. The bucket lives in the **target** account. The source account is the one about to lose its credits, and once its billing stops, anything stored in its project may be unreachable.
 
-### How Velero moves a volume
+Velero's plain snapshot mode would leave the volume data in disk snapshots inside the source project, unusable from another account. The data mover (`snapshotMoveData: true`) copies it into the bucket instead.
 
-1. In the source cluster, a Velero `Backup` with `snapshotMoveData: true` takes a CSI `VolumeSnapshot` of each PVC, mounts it, and uploads the files (with Kopia) to the bucket. The snapshot itself is deleted afterwards; only the bucket copy is kept.
-2. In the target cluster, a Velero `Restore` of that backup creates each PVC on the target's storage class and downloads the files into it.
+## Setup (once, by the user)
 
-Each cluster needs:
+In the target project: a bucket, and a service account `velero` with `roles/storage.objectAdmin` on it, whose key Velero uses in both clusters.
 
-- Velero with its node agent, and the GCP plugin for the bucket (`velero-plugin-for-gcp`).
-- A `VolumeSnapshotClass` for the GKE Persistent Disk driver (`pd.csi.storage.gke.io`), labelled `velero.io/csi-volumesnapshot-class: "true"`. GKE clusters have the snapshot CRDs.
-- A `BackupStorageLocation` pointing at the move bucket. The target's is read-only (`accessMode: ReadOnly`).
+In each cluster:
 
-### The bucket
-
-The bucket lives in the **target** account. The source account is the one about to lose its credits, and once its billing stops, anything stored in its project may be unreachable.
-
-- A service account of the target project gets `roles/storage.objectAdmin` on the bucket, and its key is given to Velero in both clusters.
-- Backups are deleted after a successful move (Velero `ttl`, e.g. 7 days, so a failed restore can be retried).
-
-## What Velero restores, and what CloudHop applies
-
-Velero only moves the volumes: its `Backup` and `Restore` include only `persistentvolumeclaims` and `persistentvolumes` of the move's namespaces. Everything else is applied by CloudHop from its stored manifests. That keeps CloudHop's rules for what is user-created as the single source of truth, and works the same for objects with no volume.
-
-CloudHop applies the manifests in dependency order: Namespaces, ServiceAccounts and RBAC, ConfigMaps and Secrets, then (after the restore) Services, workloads, Ingresses and the rest.
-
-Manifests need rewriting for a new cluster. Fields to remove or change:
-
-| Kind | Field | Why |
-|---|---|---|
-| PersistentVolumeClaim | `spec.volumeName`, annotations `pv.kubernetes.io/bind-completed`, `pv.kubernetes.io/bound-by-controller`, `volume.kubernetes.io/selected-node`, `volume.beta.kubernetes.io/storage-provisioner`, `volume.kubernetes.io/storage-provisioner` | Bind the claim to the old cluster's volume; applied elsewhere it would stay Pending forever. Velero handles these when it restores PVCs, but CloudHop must not apply its own copy. |
-| PersistentVolumeClaim | `spec.storageClassName` | Mapped to the target's class (see below). |
-| Service | `spec.clusterIP`, `spec.clusterIPs` | Allocated by each cluster. `nodePort` values are kept when free, else removed. |
-| Anything | provider-specific annotations, e.g. `cloud.google.com/neg-status` | Written by the provider's controllers. Each provider's adapter lists them. |
-
-Today's `_clean_manifest` keeps these; the move step rewrites them when applying, so the stored manifests stay a faithful copy of the source.
-
-### Storage classes
-
-A move has a storage class mapping, e.g. `standard-rwo → standard-rwo`, `premium-rwo → premium-rwo`. CloudHop proposes one from the classes found in each cluster (same name, else the target's default) and the user can change it. It is given to Velero as its `change-storage-class` ConfigMap in the target cluster, and used when rewriting PVC manifests.
+- Velero 1.14 or later with its node agent and the GCP plugin, storage location `default` on the bucket. The target's is read-only (`accessMode: ReadOnly`).
+- In the source: a `VolumeSnapshotClass` for `pd.csi.storage.gke.io`, labelled `velero.io/csi-volumesnapshot-class: "true"`.
+- RBAC for CloudHop's service account (`cloudhop-mover`): create and read Velero backups and restores, read storage locations and snapshot classes, scale Deployments and StatefulSets, and write ConfigMaps in the `velero` namespace.
 
 ## A move, step by step
 
 ```
-pending → checking → backing_up → [cutover: scaling_down → final_backup] → restoring → applying → verifying → done
-                                                        any step ──────→ failed (retryable) | cancelled
+pending → checking → [cutover: scaling_down] → backing_up → restoring → [cutover: scaling_up] → verifying → done
+                                         any step → failed (retry from that step) | cancelled
 ```
 
-1. **Checking:** both clusters are reachable, Velero runs in both, both storage locations are `Available`, every source storage class has a mapping, and the target has room (node pool sizes from the cluster sync).
-2. **Backing up:** a Velero backup of the namespaces' volumes. The workloads keep running.
-3. **Cutover** (cutover mode only, after the user confirms): CloudHop scales the source's Deployments and StatefulSets to 0, recording their replica counts, then takes a final backup. Downtime runs from here to the end of applying.
-4. **Restoring:** a Velero restore of the last backup in the target cluster, with the storage class mapping.
-5. **Applying:** CloudHop applies the rewritten manifests with server-side apply (`fieldManager: cloudhop`), workloads with the source's original replica counts.
-6. **Verifying:** every workload is available and every PVC bound. The source stays scaled down, untouched otherwise, so it can be scaled back up if the move is abandoned.
+1. **Checking:** Velero runs in both clusters, both storage locations are `Available` and point at the same bucket and prefix, every namespace exists in the source and not in the target, every storage class the source's volumes use exists in the target (after the mapping), and the source has a snapshot class for Velero.
+2. **Scaling down** (cutover only): CloudHop records the replicas of every Deployment and StatefulSet, scales them to 0, and waits for their pods to stop, so nothing writes to the volumes during the backup.
+3. **Backing up:** a Velero `Backup` of the namespaces in the source, with `snapshotMoveData: true` and a 7-day TTL, so a failed restore can be retried.
+4. **Restoring:** once the target's Velero has found the backup in the bucket (it lists it every minute by default), a Velero `Restore` in the target. Storage classes the target names differently are renamed through Velero's `change-storage-class-config` ConfigMap.
+5. **Scaling up** (cutover only): the restored workloads, which were backed up at 0, get the replicas recorded in step 2.
+6. **Verifying:** every Deployment and StatefulSet in the target has its replicas ready, and every PVC is bound.
+
+The source is never deleted. After a cutover it stays scaled to 0, so it can be scaled back up if the move is abandoned.
 
 Modes:
 
-- **Cutover** (default): the steps above. Consistent data, some downtime.
-- **Copy**: no scaling down; the target gets a crash-consistent copy while the source keeps running. For testing a move, or stateless workloads.
+- **Cutover** (default): the steps above. Consistent data; the app is down from step 2 until step 6.
+- **Copy**: no scaling; the backup is taken while the source runs, so both run afterwards. Volumes of running databases may be copied mid-write. For trying a move.
 
-## Triggering
-
-First version: a **Move** button on a cluster, which asks for the target cluster, the namespaces, the mode and the storage class mapping.
-
-Later: when `spend_status()` for the source account crosses a threshold (e.g. 80%), CloudHop starts steps 1 and 2 on its own, so a recent backup is ready, and notifies the user. The cutover always waits for the user.
+Each step that waits (pods stopping, Velero working, workloads starting) has a time limit; past it the move fails with what it was waiting for. A failed move can be retried from the step it failed at; a retried backup or restore gets a new Velero name (`cloudhop-move-<id>-<attempt>`). Cancelling stops a move after its current step and undoes nothing.
 
 ## Code
 
-Laid out as in [AGENTS.md](../AGENTS.md); `moves/models.py` becomes a package.
+- `moves/models/`: `Move` (clusters, namespaces, mode, storage class mapping, status, Velero object names, recorded replicas, timestamps) and `MoveEvent` (the move's log).
+- `moves/services/`: `create_move`, `advance` (runs the current step once), `cancel_move`, `retry_move`. Each step checks what is already done first, so running it again is safe; `advance` locks the move's row so two workers never run the same move at once.
+- `moves/tasks.py`: `advance_move` runs a step and queues itself again, every 15 seconds while a step waits. `resume_moves`, every 5 minutes, queues running moves not checked for 5 minutes, e.g. after the worker restarted.
+- `moves/views/`: `/api/v1/moves/` (list, start), `/api/v1/moves/<id>/` (with its log), `.../cancel/`, `.../retry/`.
+- `common/kube/`: `KubeClient` can now create (`post`) and merge-patch (`patch`) objects.
+- Frontend: **Moves** in the sidebar (`MovesView`, `MoveView`), and **Move namespaces** on a cluster.
 
-- `moves/models/`:
-  - `Move`: source and target cluster, namespaces, mode, storage class mapping, status, the current Velero backup and restore names, replica counts recorded at cutover, error, timestamps.
-  - `MoveEvent`: what happened at each step, shown as the move's log in the UI.
-- `moves/adapters/`: `MoveAdapter`, one per provider, for what differs between providers: the bucket, Velero's plugin and credentials, the snapshot class, provider-specific annotations to strip.
-- `moves/services/`: one function per step, each safe to run again (it checks what is already done first).
-- `moves/tasks.py`: a Celery task per step. While a Velero backup or restore runs, the task re-queues itself every 30 seconds and reads its `status.phase`.
-- `common/kube/`: `KubeClient` gains `apply()` (server-side apply), `patch()` (for scaling) and `delete()`. Today it can only read.
+The `kubernetes` app's resource sync lists built-in kinds only, so Velero's own objects are never stored.
 
-The `kubernetes` app's resource sync lists native kinds only, so Velero's own objects (CRDs) are never stored or copied.
+## Limits and open questions
 
-## Access
-
-Moves are the first part of CloudHop that changes a cluster. The README's "never changes anything" becomes "changes a cluster only during a move the user started".
-
-- Source cluster: scale Deployments and StatefulSets, and create Velero `Backup` objects.
-- Target cluster: create objects in the move's namespaces, create Velero `Restore` objects. In practice, `cluster-admin` on the target, or a ClusterRole the Guide provides.
-- GCP: the target project's service account for the bucket, as above.
-
-## Costs
-
-- Traffic out of the source region or to another provider is billed to the **source**, so a move uses some of the credits it is trying to save. Checking estimates it from the PVCs' sizes and warns when the budget left looks too small.
-- Bucket storage in the target account until the backup expires.
-
-## Open questions
-
-- Should a move also copy cluster-scoped objects the namespaces depend on (ClusterRoles, StorageClasses, PriorityClasses)? Proposed: report them in checking, apply only ClusterRoles and their bindings.
-- Ingress and DNS: the target gets new external IPs. CloudHop can show them; updating DNS stays with the user.
-- Images in the source project's Artifact Registry stop being pullable once its billing stops. The target needs access to them, or they need copying.
-
-## Milestones
-
-1. Proof of concept: move one namespace with a PVC by hand with Velero between two GKE clusters, to check the data mover and the manifest rewriting.
-2. `KubeClient` writes, manifest rewriting, and applying stored manifests to another cluster (no volumes).
-3. Velero backup and restore driven by CloudHop, copy mode.
-4. Cutover mode, the Move UI and its log.
-5. Automatic backups when a budget runs low.
+- **One move at a time per cluster.**
+- **Namespaces only.** Cluster-scoped objects the namespaces depend on (ClusterRoles, PriorityClasses, StorageClasses) are not moved; Velero restores those it finds related, and the check catches missing storage classes.
+- **New external IPs.** LoadBalancer Services and Ingresses get new addresses; DNS is up to the user.
+- **Images** in the source project's Artifact Registry stop being pullable once its billing stops.
+- **Egress** out of the source region is billed to the source, so a move uses some of the credits it is trying to save.
+- Later: starting the backup automatically when `spend_status()` crosses a threshold (the cutover still waiting for the user), CloudHop installing Velero itself, other providers.
