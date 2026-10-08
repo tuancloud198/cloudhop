@@ -8,6 +8,7 @@ from urllib.parse import quote
 from django.utils.dateparse import parse_datetime
 
 from accounts.models import Account
+from common.cloud import CloudTimeout
 from common.cloud.gcp import GCPClient
 
 from ..models import Budget
@@ -28,6 +29,8 @@ CALENDAR_PERIODS = {
 }
 # Budget filters that narrow it below whole projects
 OTHER_FILTERS = ("resourceAncestors", "services", "subaccounts", "labels")
+# Seconds a pull waits for messages; Pub/Sub holds an empty pull open until messages arrive
+PULL_WAIT = 5
 
 
 class GCPBillingAdapter(BillingAdapter):
@@ -72,11 +75,16 @@ class GCPBillingAdapter(BillingAdapter):
 
     def pull_budget_updates(self, subscription: str) -> tuple[list[dict], list[str]]:
         """Needs pubsub.subscriptions.consume on the subscription, e.g. Pub/Sub Subscriber."""
-        data = self.client.post(
-            PUBSUB_URL.format(subscription=subscription, action="pull"),
-            # CloudHop pulls on demand, so do not hold the request open waiting for messages
-            {"maxMessages": 100, "returnImmediately": True},
-        )
+        try:
+            data = self.client.post(
+                PUBSUB_URL.format(subscription=subscription, action="pull"),
+                # Not returnImmediately: with it Pub/Sub often answers empty while messages are waiting
+                {"maxMessages": 100},
+                timeout=PULL_WAIT,
+            )
+        except CloudTimeout:
+            # Nothing arrived while waiting; messages the dropped pull may have taken come back after their ack deadline
+            return [], []
         updates, ack_ids = [], []
         for received in data.get("receivedMessages", []):
             ack_ids.append(received["ackId"])

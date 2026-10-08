@@ -7,7 +7,7 @@ from unittest import mock
 from rest_framework.test import APITestCase
 
 from accounts.models import Account
-from common.cloud import CloudAPIError
+from common.cloud import CloudAPIError, CloudTimeout
 
 from .models import AccountBilling, BillingAccount, Budget, BudgetStatus
 from .services import spend_status
@@ -42,6 +42,7 @@ class FakeGCPClient:
 
     responses = {}
     pulls = []
+    pull_requests = []
     acknowledged = []
 
     def __init__(self, service_account_info, project_id):
@@ -50,9 +51,10 @@ class FakeGCPClient:
     def get(self, url, error_cls=CloudAPIError):
         return self._answer(url.format(project_id=self.project_id))
 
-    def post(self, url, body, error_cls=CloudAPIError):
+    def post(self, url, body, error_cls=CloudAPIError, timeout=10):
         url = url.format(project_id=self.project_id)
         if url.endswith(":pull"):
+            self.pull_requests.append(body)
             response = self.pulls.pop(0) if self.pulls else {}
             if isinstance(response, Exception):
                 raise response
@@ -102,6 +104,7 @@ class BillingSyncTests(APITestCase):
             },
         }
         FakeGCPClient.pulls = []
+        FakeGCPClient.pull_requests = []
         FakeGCPClient.acknowledged = []
         for target, value in [
             ("billing.adapters.gcp.GCPClient", FakeGCPClient),
@@ -141,6 +144,18 @@ class BillingSyncTests(APITestCase):
         self.assertEqual((status.cost_amount, status.threshold_exceeded), (Decimal("150.26"), 0.5))
         spend = response.data["spend"]
         self.assertEqual((spend["spent"], spend["amount"], spend["ratio"]), ("150.26", "300.00", 150.26 / 300))
+
+    def test_pull_waits_for_messages(self):
+        BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
+        FakeGCPClient.pulls = [{"receivedMessages": [notification("m1", 10)]}, CloudTimeout("GCP did not answer within 5s")]
+
+        response = self.sync()
+
+        # returnImmediately makes Pub/Sub answer empty while messages are waiting
+        self.assertNotIn("returnImmediately", FakeGCPClient.pull_requests[0])
+        # A pull that times out found nothing more; it is not a failure
+        self.assertEqual((response.data["received"], response.data["warnings"]), (1, []))
+        self.assertEqual(FakeGCPClient.acknowledged, ["ack-m1"])
 
     def test_redelivered_notification_is_stored_once(self):
         BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
