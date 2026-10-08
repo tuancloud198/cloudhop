@@ -13,11 +13,13 @@ It runs on your machine only. It reads from the cloud and never changes anything
   - Fields set by the API server are removed, and `status` is kept apart from the manifest.
   - Secrets keep their values. The UI can decode them.
 - **Billing:** find the billing account paying for each account, read its budgets, and follow spend through the budget notifications the provider sends to Pub/Sub. Several accounts can share one billing account and its credits. `billing.services.spend_status(account)` tells how much of the budget covering an account is used.
-- **Moves** *(planned)*: move workloads to another account when its budget is close to used up.
+- **Moves** *(planned)*: move workloads to another account when its budget is close to used up. See the [design](docs/moves.md).
 
 Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 
 ## How it is built
+
+![CloudHop architecture: the UI on nginx, Django and the Celery worker running the sync services against Google Cloud, and the planned moves flow](docs/architecture.svg)
 
 | Part | What it is |
 |---|---|
