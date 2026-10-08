@@ -10,7 +10,10 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -91,6 +94,12 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
+        'OPTIONS': {
+            # Celery workers write at the same time as the web server: wait for the lock
+            # instead of failing, and take it when a transaction starts so it cannot deadlock
+            'timeout': 20,
+            'transaction_mode': 'IMMEDIATE',
+        },
     }
 }
 
@@ -138,5 +147,30 @@ STATIC_URL = 'static/'
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+
+# Celery: syncs clusters, resources and billing in the background (run a worker with --beat)
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+# Nothing reads task results; failures are logged by the worker
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TIMEZONE = TIME_ZONE
+
+# Minutes between scheduled syncs; a queued sync not started by the next run is dropped
+SYNC_INTERVAL_MINUTES = 15
+CELERY_BEAT_SCHEDULE = {
+    "sync-clusters": {
+        "task": "clusters.tasks.sync_all_clusters",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
+    },
+    "sync-resources": {
+        "task": "kubernetes.tasks.sync_all_resources",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
+    },
+    "sync-billing": {
+        "task": "billing.tasks.sync_all_billing",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
     },
 }

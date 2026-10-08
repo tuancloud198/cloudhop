@@ -9,6 +9,7 @@ from rest_framework.test import APITestCase
 from accounts.models import Account
 from billing.models import AccountBilling, BillingAccount, Budget, BudgetStatus
 from billing.services import spend_status
+from billing.tasks import sync_account_billing, sync_all_billing
 from common.cloud import CloudAPIError, CloudTimeout
 
 BILLING_ID = "0123AB-CDEF01-234567"
@@ -212,6 +213,27 @@ class BillingSyncTests(APITestCase):
         status = spend_status(self.account)
 
         self.assertEqual(status["budget_id"], budget.pk)
+
+
+class BillingTaskTests(APITestCase):
+    def test_schedule_queues_usable_accounts_only(self):
+        usable = Account.objects.create(
+            name="usable", provider="gcp", external_id="1", project_id="usable", credential_ref="/unused.json", is_valid=True,
+        )
+        Account.objects.create(name="unvalidated", provider="gcp", external_id="2", project_id="other", credential_ref="/unused.json")
+
+        with mock.patch.object(sync_account_billing, "apply_async") as apply_async:
+            sync_all_billing()
+
+        apply_async.assert_called_once_with((usable.pk,), expires=15 * 60)
+
+    def test_sync_warnings_are_logged(self):
+        result = {"billing": None, "warnings": ["Cannot list budgets: permission denied"], "received": 0}
+
+        with mock.patch("billing.tasks.sync_billing", return_value=result), self.assertLogs("billing.tasks", "WARNING") as logs:
+            sync_account_billing(1)
+
+        self.assertIn("Cannot list budgets", logs.output[0])
 
 
 class BillingAccountUpdateTests(APITestCase):

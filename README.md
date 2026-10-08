@@ -50,6 +50,20 @@ npm run dev
 
 Open http://localhost:5173. Vite forwards `/api` to Django; set `CLOUDHOP_API` to point it elsewhere.
 
+### Background syncs
+
+A Celery worker syncs every account's clusters and billing, and every cluster's resources, each 15 minutes (`SYNC_INTERVAL_MINUTES` in settings). The refresh buttons in the UI still sync right away. The worker needs Redis as its broker; set `CELERY_BROKER_URL` to use another one.
+
+```sh
+# Redis, if you do not have one running
+docker run -d --name cloudhop-redis -p 127.0.0.1:6379:6379 redis:7-alpine
+
+# Worker and scheduler, in another shell
+celery -A cloudhop worker --beat --concurrency 2 --loglevel info
+```
+
+A sync that fails is logged by the worker and tried again on the next run. Keep the concurrency low: every worker writes to the same SQLite file.
+
 Run the tests with `python manage.py test`.
 
 ## Setting up a cloud account
@@ -59,7 +73,7 @@ The **Guide** page in the app (`/guide`) has the full steps for each provider. F
 1. Enable the APIs and create a service account with `roles/container.viewer`.
 2. Bind it to a ClusterRole that can read Secrets in each cluster, because Kubernetes Engine Viewer cannot.
 3. Optionally, track spend: create a budget whose amount is your credit total, connect it to a Pub/Sub topic, and give CloudHop's service account `roles/pubsub.subscriber` on the subscription.
-4. Add the key in CloudHop, then sync clusters, resources and billing from the UI.
+4. Add the key in CloudHop, then sync clusters, resources and billing from the UI. After that the worker keeps them up to date.
 
 ## Security
 

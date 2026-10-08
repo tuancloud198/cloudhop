@@ -2,3 +2,4 @@ django==6.1.1
 djangorestframework
 google-auth[requests]
 requests
+celery[redis]

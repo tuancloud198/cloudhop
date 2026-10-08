@@ -11,6 +11,7 @@ from kubernetes.adapters import KubeAccessAdapter
 from kubernetes.models import KubeResource
 
 __all__ = [
+    "AccountNotUsable",
     "ClusterNotUsable",
     "list_native_resource_types",
     "resource_summary",
