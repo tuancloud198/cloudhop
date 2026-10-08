@@ -1,6 +1,6 @@
 import base64
 import json
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest import mock
 
@@ -43,6 +43,8 @@ class FakeGCPClient:
     responses = {}
     pulls = []
     pull_requests = []
+    seeks = []
+    seek_response = {}
     acknowledged = []
 
     def __init__(self, service_account_info, project_id):
@@ -59,6 +61,11 @@ class FakeGCPClient:
             if isinstance(response, Exception):
                 raise response
             return response
+        if url.endswith(":seek"):
+            if isinstance(self.seek_response, Exception):
+                raise self.seek_response
+            self.seeks.append(body["time"])
+            return {}
         if url.endswith(":acknowledge"):
             self.acknowledged.extend(body["ackIds"])
             return {}
@@ -105,6 +112,8 @@ class BillingSyncTests(APITestCase):
         }
         FakeGCPClient.pulls = []
         FakeGCPClient.pull_requests = []
+        FakeGCPClient.seeks = []
+        FakeGCPClient.seek_response = {}
         FakeGCPClient.acknowledged = []
         for target, value in [
             ("billing.adapters.gcp.GCPClient", FakeGCPClient),
@@ -156,6 +165,36 @@ class BillingSyncTests(APITestCase):
         # A pull that times out found nothing more; it is not a failure
         self.assertEqual((response.data["received"], response.data["warnings"]), (1, []))
         self.assertEqual(FakeGCPClient.acknowledged, ["ack-m1"])
+
+    def test_cold_start_replays_the_subscription(self):
+        BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
+        FakeGCPClient.pulls = [{"receivedMessages": [notification("m1", 10)]}, {}]
+
+        with mock.patch("billing.services.billing.timezone.now", return_value=datetime(2026, 10, 8, 5, tzinfo=UTC)):
+            response = self.sync()
+
+        # Back by REPLAY_PERIOD, before pulling
+        self.assertEqual(FakeGCPClient.seeks, ["2026-09-07T05:00:00Z"])
+        self.assertEqual(response.data["received"], 1)
+
+    def test_no_replay_once_notifications_are_stored(self):
+        BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
+        FakeGCPClient.pulls = [{"receivedMessages": [notification("m1", 10)]}, {}, {}]
+        self.sync()
+
+        self.sync()
+
+        self.assertEqual(len(FakeGCPClient.seeks), 1)
+
+    def test_failed_replay_is_a_warning_and_still_pulls(self):
+        BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
+        FakeGCPClient.seek_response = CloudAPIError("permission denied on GCP project demo-project: pubsub.subscriptions.consume")
+        FakeGCPClient.pulls = [{"receivedMessages": [notification("m1", 10)]}, {}]
+
+        response = self.sync()
+
+        self.assertIn("Cannot replay earlier budget notifications", response.data["warnings"][0])
+        self.assertEqual(response.data["received"], 1)
 
     def test_redelivered_notification_is_stored_once(self):
         BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)

@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from datetime import datetime
 from functools import cached_property
 
 from accounts.models import Account
@@ -51,6 +52,14 @@ class BillingAdapter(ProviderAdapter):
         budget_name, message_id and the BudgetStatus fields. ack_ids covers every
         message received, including malformed ones left out of updates.
         Raises CloudAPIError if the provider call fails.
+        """
+
+    @abstractmethod
+    def replay_budget_updates(self, subscription: str, since: datetime) -> None:
+        """Make the notifications published since `since` deliverable again, acknowledged ones included.
+
+        Only those the provider still keeps come back. Raises CloudAPIError if the
+        provider call fails, e.g. when it keeps no acknowledged messages.
         """
 
     @abstractmethod

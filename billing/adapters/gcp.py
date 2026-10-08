@@ -1,7 +1,7 @@
 import base64
 import json
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
@@ -93,6 +93,17 @@ class GCPBillingAdapter(BillingAdapter):
                 # Acknowledged anyway, or it would come back on every pull
                 logger.warning("Ignoring malformed budget notification %s: %s", received["message"].get("messageId"), exc)
         return updates, ack_ids
+
+    def replay_budget_updates(self, subscription: str, since: datetime) -> None:
+        """Needs pubsub.subscriptions.consume on the subscription, e.g. Pub/Sub Subscriber.
+
+        Seeking back finds only the messages Pub/Sub kept: those still within the topic's
+        message retention, or the subscription's when it retains acknowledged messages.
+        """
+        self.client.post(
+            PUBSUB_URL.format(subscription=subscription, action="seek"),
+            {"time": since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        )
 
     def acknowledge(self, subscription: str, ack_ids: list[str]) -> None:
         self.client.post(PUBSUB_URL.format(subscription=subscription, action="acknowledge"), {"ackIds": ack_ids})
