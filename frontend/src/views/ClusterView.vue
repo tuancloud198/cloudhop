@@ -183,6 +183,15 @@ function memory(mb) {
           </div>
         </div>
         <div class="actions">
+          <RouterLink
+            v-if="cluster?.is_active"
+            class="btn"
+            :to="{ name: 'moves', query: { source: cluster.id } }"
+            title="Copy namespaces of this cluster, with their data, to another cluster"
+          >
+            <AppIcon name="move" :size="14" />
+            Move namespaces
+          </RouterLink>
           <button class="btn btn-primary" :disabled="syncing || !cluster?.is_active" @click="syncResources">
             <span v-if="syncing" class="spinner" />
             <AppIcon v-else name="refresh" :size="14" />

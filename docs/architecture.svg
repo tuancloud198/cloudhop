@@ -1,0 +1,145 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 600" width="1000" height="600" role="img" aria-labelledby="title desc">
+  <title id="title">CloudHop architecture</title>
+  <desc id="desc">The browser loads the UI from nginx, which forwards the API to Django. Celery beat queues syncs through Redis for the Celery worker. Django and the worker run the same sync services, store data in PostgreSQL, and call Google Cloud: project and billing APIs, the GKE API, each cluster's Kubernetes API, and the Pub/Sub subscription that receives budget notifications. Moves scale the source down, back up its namespaces with Velero into a bucket in the target account, restore them in the target cluster, and scale them up.</desc>
+  <defs>
+    <style>
+      :root {
+        --bg: #ffffff; --box: #f6f7f9; --stroke: #c9ced6; --text: #1a1d23; --muted: #626b78;
+        --compose: #2563eb; --cloud: #15803d; --moves: #b45309; --edge: #626b78;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1115; --box: #171a20; --stroke: #3a404b; --text: #e6e8ec; --muted: #9aa3b2;
+          --compose: #4f86f7; --cloud: #4cc27a; --moves: #e3a33f; --edge: #9aa3b2;
+        }
+      }
+      text { font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      .bg { fill: var(--bg); }
+      .box { fill: var(--box); stroke: var(--stroke); stroke-width: 1; }
+      .t { fill: var(--text); font-size: 14px; font-weight: 600; text-anchor: middle; }
+      .s { fill: var(--muted); font-size: 11.5px; text-anchor: middle; }
+      .label { fill: var(--muted); font-size: 11px; }
+      .group { fill: none; stroke-width: 1.5; }
+      .group-label { font-size: 12.5px; font-weight: 600; letter-spacing: 0.02em; }
+      .compose { stroke: var(--compose); }
+      .compose-label { fill: var(--compose); }
+      .cloud { stroke: var(--cloud); }
+      .cloud-label { fill: var(--cloud); }
+      .moves { stroke: var(--moves); }
+      .moves-label { fill: var(--moves); }
+      .edge { stroke: var(--edge); stroke-width: 1.5; fill: none; }
+      .head { fill: var(--edge); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1000" height="600" rx="12" />
+
+  <!-- Browser -->
+  <rect class="box" x="20" y="60" width="150" height="52" rx="8" />
+  <text class="t" x="95" y="82">Browser</text>
+  <text class="s" x="95" y="100">localhost:8080</text>
+
+  <!-- Docker Compose -->
+  <rect class="group compose" x="200" y="20" width="460" height="410" rx="12" />
+  <text class="group-label compose-label" x="216" y="42">DOCKER COMPOSE · LOCALHOST</text>
+
+  <rect class="box" x="215" y="60" width="120" height="52" rx="8" />
+  <text class="t" x="275" y="82">fe</text>
+  <text class="s" x="275" y="100">nginx + Vue UI</text>
+
+  <rect class="box" x="215" y="160" width="120" height="70" rx="8" />
+  <text class="t" x="275" y="184">be</text>
+  <text class="s" x="275" y="202">Django + DRF</text>
+  <text class="s" x="275" y="218">Refresh buttons</text>
+
+  <rect class="box" x="370" y="170" width="120" height="120" rx="8" />
+  <text class="t" x="430" y="224">postgres</text>
+  <text class="s" x="430" y="242">all synced data</text>
+
+  <rect class="box" x="525" y="60" width="120" height="52" rx="8" />
+  <text class="t" x="585" y="82">celery-beat</text>
+  <text class="s" x="585" y="100">every 15 minutes</text>
+
+  <rect class="box" x="525" y="150" width="120" height="50" rx="8" />
+  <text class="t" x="585" y="171">redis</text>
+  <text class="s" x="585" y="189">Celery broker</text>
+
+  <rect class="box" x="525" y="240" width="120" height="64" rx="8" />
+  <text class="t" x="585" y="266">celery-worker</text>
+  <text class="s" x="585" y="284">syncs and moves</text>
+
+  <rect class="box" x="215" y="350" width="430" height="60" rx="8" />
+  <text class="t" x="430" y="374">Sync services</text>
+  <text class="s" x="430" y="393">accounts · clusters · kubernetes · billing · moves</text>
+
+  <path class="edge" d="M170,86 L213,86" marker-end="url(#arrow)" />
+  <path class="edge" d="M275,112 L275,158" marker-end="url(#arrow)" />
+  <text class="label" x="283" y="140">/api</text>
+  <path class="edge" d="M585,112 L585,148" marker-end="url(#arrow)" />
+  <text class="label" x="593" y="134">queues</text>
+  <path class="edge" d="M585,200 L585,238" marker-end="url(#arrow)" />
+  <path class="edge" d="M335,200 L368,200" marker-end="url(#arrow)" />
+  <path class="edge" d="M525,270 L492,270" marker-end="url(#arrow)" />
+  <path class="edge" d="M275,230 L275,348" marker-end="url(#arrow)" />
+  <path class="edge" d="M585,304 L585,348" marker-end="url(#arrow)" />
+  <path class="edge" d="M645,380 L698,380" marker-end="url(#arrow)" />
+  <text class="label" x="671" y="372" text-anchor="middle">HTTPS</text>
+
+  <!-- Google Cloud -->
+  <rect class="group cloud" x="700" y="20" width="280" height="410" rx="12" />
+  <text class="group-label cloud-label" x="716" y="42">GOOGLE CLOUD · PROJECT PER ACCOUNT</text>
+
+  <rect class="box" x="720" y="58" width="240" height="48" rx="8" />
+  <text class="t" x="840" y="78">Project &amp; billing APIs</text>
+  <text class="s" x="840" y="95">Resource Manager, Billing, Budgets</text>
+
+  <rect class="box" x="720" y="122" width="240" height="48" rx="8" />
+  <text class="t" x="840" y="142">GKE API</text>
+  <text class="s" x="840" y="159">clusters and node pools</text>
+
+  <rect class="box" x="720" y="186" width="240" height="48" rx="8" />
+  <text class="t" x="840" y="206">GKE clusters</text>
+  <text class="s" x="840" y="223">Kubernetes API: native objects</text>
+
+  <rect class="box" x="720" y="258" width="240" height="52" rx="8" />
+  <text class="t" x="840" y="280">Budget → Pub/Sub topic</text>
+  <text class="s" x="840" y="298">keeps messages 31 days</text>
+
+  <rect class="box" x="720" y="346" width="240" height="52" rx="8" />
+  <text class="t" x="840" y="368">Pub/Sub subscription</text>
+  <text class="s" x="840" y="386">pulled; replayed on cold start</text>
+
+  <path class="edge" d="M840,310 L840,344" marker-end="url(#arrow)" />
+
+  <!-- Moves -->
+  <rect class="group moves" x="20" y="450" width="960" height="130" rx="12" />
+  <text class="group-label moves-label" x="40" y="476">MOVES · CUTOVER</text>
+
+  <rect class="box" x="40" y="492" width="160" height="64" rx="8" />
+  <text class="t" x="120" y="518">Check, scale down</text>
+  <text class="s" x="120" y="536">source workloads to 0</text>
+
+  <rect class="box" x="230" y="492" width="160" height="64" rx="8" />
+  <text class="t" x="310" y="518">Velero backup</text>
+  <text class="s" x="310" y="536">objects + volume data</text>
+
+  <rect class="box" x="420" y="492" width="160" height="64" rx="8" />
+  <text class="t" x="500" y="518">Object bucket</text>
+  <text class="s" x="500" y="536">in the target account</text>
+
+  <rect class="box" x="610" y="492" width="160" height="64" rx="8" />
+  <text class="t" x="690" y="518">Velero restore</text>
+  <text class="s" x="690" y="536">in the target cluster</text>
+
+  <rect class="box" x="800" y="492" width="160" height="64" rx="8" />
+  <text class="t" x="880" y="518">Scale up, verify</text>
+  <text class="s" x="880" y="536">replicas the source had</text>
+
+  <path class="edge" d="M200,524 L228,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M390,524 L418,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M580,524 L608,524" marker-end="url(#arrow)" />
+  <path class="edge" d="M770,524 L798,524" marker-end="url(#arrow)" />
+</svg>

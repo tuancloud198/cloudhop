@@ -177,4 +177,9 @@ CELERY_BEAT_SCHEDULE = {
         "task": "billing.tasks.sync_all_billing",
         "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
     },
+    # Moves run step by step on their own; this picks up any whose next run was lost
+    "resume-moves": {
+        "task": "moves.tasks.resume_moves",
+        "schedule": crontab(minute="*/5"),
+    },
 }

@@ -17,7 +17,7 @@ const PROVIDER_OPTIONS = [
   { value: 'azure', label: 'Azure', ready: false },
 ]
 // Anchors inside a provider's setup; jumping to one selects that provider
-const PROVIDER_ANCHORS = { 'gcp-secrets': 'gcp', 'gcp-billing': 'gcp' }
+const PROVIDER_ANCHORS = { 'gcp-secrets': 'gcp', 'gcp-billing': 'gcp', 'gcp-moves': 'gcp' }
 
 const provider = ref('gcp')
 const selectedProvider = computed(() => PROVIDER_OPTIONS.find((option) => option.value === provider.value))
@@ -146,6 +146,110 @@ const applySecretReader = computed(() => `gcloud container clusters get-credenti
 
 kubectl apply -f cloudhop-secret-reader.yaml`)
 
+// Moves: TARGET_PROJECT is left for the user, since fill() only knows the selected account
+const moveBucket = `# In the target account's project: the bucket, and the account Velero uses for it
+gcloud storage buckets create gs://BUCKET \\
+  --project TARGET_PROJECT \\
+  --location REGION \\
+  --uniform-bucket-level-access
+
+gcloud iam service-accounts create velero \\
+  --project TARGET_PROJECT \\
+  --display-name "Velero for CloudHop moves"
+
+gcloud storage buckets add-iam-policy-binding gs://BUCKET \\
+  --member serviceAccount:velero@TARGET_PROJECT.iam.gserviceaccount.com \\
+  --role roles/storage.objectAdmin
+
+gcloud iam service-accounts keys create velero-key.json \\
+  --iam-account velero@TARGET_PROJECT.iam.gserviceaccount.com`
+
+const installVelero = `# In each cluster, source and target, with kubectl pointing at it
+velero install \\
+  --provider gcp \\
+  --plugins velero/velero-plugin-for-gcp:PLUGIN_VERSION \\
+  --bucket BUCKET \\
+  --secret-file ./velero-key.json \\
+  --use-node-agent \\
+  --use-volume-snapshots=false
+
+# In the target only: read the bucket, never write to it
+kubectl -n velero patch backupstoragelocation default \\
+  --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'
+
+# Both should say Available
+velero backup-location get`
+
+const snapshotClass = `apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: velero-pd
+  labels:
+    # Velero takes CSI snapshots with the class carrying this label
+    velero.io/csi-volumesnapshot-class: "true"
+driver: pd.csi.storage.gke.io
+# The snapshot is only needed until Velero has copied it to the bucket
+deletionPolicy: Delete
+`
+
+const moverRole = computed(() => `apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudhop-mover
+rules:
+  - apiGroups: ["velero.io"]
+    resources: ["backups", "restores"]
+    verbs: ["get", "list", "create"]
+  - apiGroups: ["velero.io"]
+    resources: ["backupstoragelocations"]
+    verbs: ["get", "list"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshotclasses"]
+    verbs: ["get", "list"]
+  # Cutover: scale the source down and the target up
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudhop-mover
+subjects:
+  - kind: User
+    name: "${uniqueId.value}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cloudhop-mover
+  apiGroup: rbac.authorization.k8s.io
+---
+# Storage class renames for Velero's restores, in its namespace only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cloudhop-mover
+  namespace: velero
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cloudhop-mover
+  namespace: velero
+subjects:
+  - kind: User
+    name: "${uniqueId.value}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: Role
+  name: cloudhop-mover
+  apiGroup: rbac.authorization.k8s.io
+`)
+
 // The page scrolls inside .main, not the window, so the router cannot jump to #anchors itself
 async function scrollToHash() {
   if (!route.hash) return
@@ -170,6 +274,7 @@ watch(() => route.hash, scrollToHash)
         <RouterLink :to="{ hash: '#providers' }">Provider setup</RouterLink>
         <RouterLink :to="{ hash: '#gcp-secrets' }">Reading Secrets on GKE</RouterLink>
         <RouterLink :to="{ hash: '#gcp-billing' }">Spend and credits on Google Cloud</RouterLink>
+        <RouterLink :to="{ hash: '#gcp-moves' }">Moving namespaces on Google Cloud</RouterLink>
       </nav>
     </header>
 
@@ -509,6 +614,72 @@ watch(() => route.hash, scrollToHash)
             <li>
               <strong>Spend lags.</strong> Usage reaches GCP's billing reports hours later, sometimes up to a day. Act
               on a margin, such as 85%, rather than waiting for 100%.
+            </li>
+          </ul>
+        </div>
+
+        <div id="gcp-moves" class="subsection">
+          <h3>
+            <AppIcon name="move" :size="16" />
+            Moving namespaces
+          </h3>
+          <p>
+            A move copies namespaces, with every object and the data of their volumes, to a cluster in another account.
+            <a href="https://velero.io" target="_blank" rel="noopener">Velero</a> does the copy: in the source cluster
+            it backs the namespaces up into a Cloud Storage bucket, and in the target it restores them. CloudHop starts
+            each step, scales the workloads down and up for a cutover, and checks the result.
+          </p>
+          <p>
+            Put the bucket in the <strong>target</strong> account. The source is the one running out of credits, and
+            once its billing stops, a bucket there may no longer be readable.
+          </p>
+          <ol class="steps">
+            <li>
+              <strong>Create the bucket and Velero's service account</strong> in the target project. Use a region
+              close to both clusters; copying out of the source's region is billed to the source.
+              <CodeBlock :code="moveBucket" label="shell" />
+              <p class="muted small">
+                Keep <code>velero-key.json</code> out of git, like CloudHop's own key.
+              </p>
+            </li>
+            <li>
+              <strong>Install Velero in both clusters</strong> with the
+              <a href="https://velero.io/docs/main/basic-install/" target="_blank" rel="noopener">Velero CLI</a>,
+              version 1.14 or later. Pick <code>PLUGIN_VERSION</code> from the
+              <a href="https://github.com/vmware-tanzu/velero-plugin-for-gcp#compatibility" target="_blank" rel="noopener">
+                GCP plugin's compatibility table</a> for your Velero version. Both clusters use the same bucket; the
+              target's storage location is made read-only.
+              <CodeBlock :code="installVelero" label="shell" />
+            </li>
+            <li>
+              <strong>Let Velero snapshot volumes in the source cluster.</strong> Velero snapshots each volume, copies
+              the snapshot's files into the bucket, then deletes the snapshot.
+              <CodeBlock :code="snapshotClass" label="velero-snapshot-class.yaml" />
+            </li>
+            <li>
+              <strong>Allow CloudHop to run moves</strong> in both clusters: create Velero backups and restores, and
+              scale workloads. Bind it, as for Secrets above, to the unique ID of the account that owns each cluster:
+              pick that account at the top of this page before copying.
+              <CodeBlock :code="moverRole" label="cloudhop-mover.yaml" />
+            </li>
+            <li>
+              <strong>Start a move</strong> from <strong>Moves</strong>, or <strong>Move namespaces</strong> on a
+              cluster. CloudHop checks all of the above first and says what is missing.
+            </li>
+          </ol>
+          <h3>What to know</h3>
+          <ul>
+            <li>
+              <strong>Cutover</strong> stops the source workloads before the last backup, so the data is consistent;
+              the app is down until the target is ready. The source is left scaled to 0, not deleted.
+            </li>
+            <li>
+              <strong>New external IPs.</strong> LoadBalancer Services and Ingresses get new addresses in the target;
+              update DNS yourself.
+            </li>
+            <li>
+              <strong>Images.</strong> Images in the source project's Artifact Registry stop being pullable once its
+              billing stops; give the target access to them, or copy them.
             </li>
           </ul>
         </div>

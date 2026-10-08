@@ -2,7 +2,7 @@
 
 CloudHop keeps track of Kubernetes workloads spread over several cloud accounts, and of how much of each account's budget is spent, so the workloads can be mirrored to another account when one runs low.
 
-It runs on your machine only. It reads from the cloud and never changes anything in a project or a cluster.
+It runs on your machine only. It reads from the cloud, and changes a cluster only during a move you start.
 
 ## What it does
 
@@ -13,11 +13,13 @@ It runs on your machine only. It reads from the cloud and never changes anything
   - Fields set by the API server are removed, and `status` is kept apart from the manifest.
   - Secrets keep their values. The UI can decode them.
 - **Billing:** find the billing account paying for each account, read its budgets, and follow spend through the budget notifications the provider sends to Pub/Sub. Several accounts can share one billing account and its credits. `billing.services.spend_status(account)` tells how much of the budget covering an account is used.
-- **Moves** *(planned)*: move workloads to another account when its budget is close to used up.
+- **Moves:** copy namespaces, with their objects and volume data, to a cluster in another account when its budget is close to used up. [Velero](https://velero.io) does the copy through a bucket in the target account; CloudHop runs the steps, including a cutover that stops the source first. See [docs/moves.md](docs/moves.md).
 
 Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 
 ## How it is built
+
+![CloudHop architecture: the UI on nginx, Django and the Celery worker running the sync services against Google Cloud, and the steps of a move](docs/architecture.svg)
 
 | Part | What it is |
 |---|---|
@@ -25,7 +27,7 @@ Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 | `clusters/` | Kubernetes clusters of each account |
 | `kubernetes/` | Resources stored from each cluster |
 | `billing/` | Billing accounts, budgets and spend updates |
-| `moves/` | Migration tasks (not built yet) |
+| `moves/` | Moves of namespaces between clusters, run step by step with Velero |
 | `common/` | Shared code: cloud errors, the provider adapter registry, the GCP and Kubernetes clients |
 | `frontend/` | Vue 3 + Vite UI |
 
