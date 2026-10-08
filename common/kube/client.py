@@ -3,7 +3,7 @@ import tempfile
 
 import requests
 
-from ..cloud import CloudAPIError
+from common.cloud import CloudAPIError
 
 logger = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import ResourceListView, ResourceSummaryView, ResourceSyncView
+from kubernetes.views import ResourceListView, ResourceSummaryView, ResourceSyncView
 
 urlpatterns = [
     path("clusters/<int:cluster_id>/resources/", ResourceListView.as_view(), name="resource-list"),

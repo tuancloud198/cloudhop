@@ -1,8 +1,8 @@
 from rest_framework import mixins, viewsets
 
-from ..models import Account
-from ..serializers import AccountSerializer
-from ..services import delete_credential_file
+from accounts.models import Account
+from accounts.serializers import AccountSerializer
+from accounts.services import delete_credential_file
 
 
 class AccountViewSet(

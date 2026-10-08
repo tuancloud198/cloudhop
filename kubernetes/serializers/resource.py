@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from ..models import KubeResource
+from kubernetes.models import KubeResource
 
 
 class KubeResourceSerializer(serializers.ModelSerializer):

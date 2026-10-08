@@ -5,7 +5,7 @@ from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2 import service_account
 
-from ..errors import CloudAPIError, CloudTimeout, InvalidCredential
+from common.cloud.errors import CloudAPIError, CloudTimeout, InvalidCredential
 
 logger = logging.getLogger(__name__)
 

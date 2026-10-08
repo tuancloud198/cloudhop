@@ -7,10 +7,9 @@ from unittest import mock
 from rest_framework.test import APITestCase
 
 from accounts.models import Account
+from billing.models import AccountBilling, BillingAccount, Budget, BudgetStatus
+from billing.services import spend_status
 from common.cloud import CloudAPIError, CloudTimeout
-
-from .models import AccountBilling, BillingAccount, Budget, BudgetStatus
-from .services import spend_status
 
 BILLING_ID = "0123AB-CDEF01-234567"
 SUBSCRIPTION = "projects/demo-project/subscriptions/cloudhop-budget"

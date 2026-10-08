@@ -24,7 +24,8 @@ Rules:
 
 - Name each module after the resource it holds (`account.py`, `cluster.py`, ...).
 - Re-export every public name in the package `__init__.py` and list it in `__all__`. Other code imports from the package (`from accounts.models import Account`), never from the submodule.
-- Inside a package module, import sibling packages with two dots (`from ..models import Account`).
+- Use absolute imports that name the app (`from accounts.models import Account`), never relative ones (`from ..models import Account`). The only exception is the re-exports in a package's `__init__.py` (`from .account import Account`).
+- To import another module of the same package, name the module (`from billing.adapters.base import BillingAdapter`). Importing the package itself would be circular, since its `__init__.py` imports that module.
 - Every model must be re-exported from `models/__init__.py`, otherwise Django will not detect it for migrations.
 - After adding or moving a model, run `python manage.py makemigrations --check --dry-run` to confirm Django still sees it.
 

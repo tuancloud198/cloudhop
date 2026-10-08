@@ -1,8 +1,7 @@
+from accounts.adapters.base import CredentialAdapter
+from accounts.models import Account
 from common.cloud import InvalidCredential
 from common.cloud.gcp import GCPClient
-
-from ..models import Account
-from .base import CredentialAdapter
 
 PROJECT_URL = "https://cloudresourcemanager.googleapis.com/v3/projects/{project_id}"
 

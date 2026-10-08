@@ -5,10 +5,9 @@ from rest_framework.views import APIView
 
 from clusters.models import Clusters
 from common.cloud import CloudAPIError, InvalidCredential, UnsupportedProvider
-
-from ..models import KubeResource
-from ..serializers import KubeResourceSerializer
-from ..services import ClusterNotUsable, resource_summary, sync_resources
+from kubernetes.models import KubeResource
+from kubernetes.serializers import KubeResourceSerializer
+from kubernetes.services import ClusterNotUsable, resource_summary, sync_resources
 
 
 class ResourceSyncView(APIView):

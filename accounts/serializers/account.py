@@ -1,9 +1,8 @@
 from rest_framework import serializers
 
+from accounts.models import Account
+from accounts.services import delete_credential_file, resolve_account, store_credential_file
 from common.cloud import CloudAPIError
-
-from ..models import Account
-from ..services import delete_credential_file, resolve_account, store_credential_file
 
 
 class AccountSerializer(serializers.ModelSerializer):

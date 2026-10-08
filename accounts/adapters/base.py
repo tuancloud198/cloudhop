@@ -1,9 +1,8 @@
 from abc import abstractmethod
 from functools import cached_property
 
+from accounts.models import Account
 from common.cloud import ProviderAdapter, load_credential_file
-
-from ..models import Account
 
 
 class CredentialAdapter(ProviderAdapter):
