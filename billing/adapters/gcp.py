@@ -16,8 +16,12 @@ from common.cloud.gcp.client import GCPClient
 logger = logging.getLogger(__name__)
 
 PROJECT_URL = "https://cloudresourcemanager.googleapis.com/v3/projects/{project_id}"
-BILLING_INFO_URL = "https://cloudbilling.googleapis.com/v1/projects/{project_id}/billingInfo"
-BILLING_ACCOUNT_URL = "https://cloudbilling.googleapis.com/v1/billingAccounts/{billing_account_id}"
+BILLING_INFO_URL = (
+    "https://cloudbilling.googleapis.com/v1/projects/{project_id}/billingInfo"
+)
+BILLING_ACCOUNT_URL = (
+    "https://cloudbilling.googleapis.com/v1/billingAccounts/{billing_account_id}"
+)
 BUDGETS_URL = "https://billingbudgets.googleapis.com/v1/billingAccounts/{billing_account_id}/budgets"
 PUBSUB_URL = "https://pubsub.googleapis.com/v1/{subscription}:{action}"
 
@@ -29,7 +33,7 @@ CALENDAR_PERIODS = {
 # Budget filters that narrow it below whole projects
 OTHER_FILTERS = ("resourceAncestors", "services", "subaccounts", "labels")
 # Seconds a pull waits for messages; Pub/Sub holds an empty pull open until messages arrive
-PULL_WAIT = 5
+PULL_WAIT = 20
 
 
 class GCPBillingAdapter(BillingAdapter):
@@ -46,14 +50,19 @@ class GCPBillingAdapter(BillingAdapter):
         project = client.get(PROJECT_URL)
         return {
             # "billingAccounts/012345-ABCDEF-678901", or "" when billing is off
-            "billing_account_id": info.get("billingAccountName", "").removeprefix("billingAccounts/") or None,
+            "billing_account_id": info.get("billingAccountName", "").removeprefix(
+                "billingAccounts/"
+            )
+            or None,
             "billing_enabled": info.get("billingEnabled", False),
             "project_number": project["name"].removeprefix("projects/"),
         }
 
     def get_billing_account(self, billing_account_id: str) -> dict:
         """Needs billing.accounts.get on the billing account, e.g. Billing Account Viewer."""
-        data = self.client.get(BILLING_ACCOUNT_URL.format(billing_account_id=billing_account_id))
+        data = self.client.get(
+            BILLING_ACCOUNT_URL.format(billing_account_id=billing_account_id)
+        )
         return {
             "name": data.get("displayName", ""),
             "currency": data.get("currencyCode", ""),
@@ -66,8 +75,12 @@ class GCPBillingAdapter(BillingAdapter):
         url = BUDGETS_URL.format(billing_account_id=billing_account_id)
         budgets, page_token = [], ""
         while True:
-            data = client.get(f"{url}?pageToken={quote(page_token, safe='')}" if page_token else url)
-            budgets.extend(self._normalize_budget(budget) for budget in data.get("budgets", []))
+            data = client.get(
+                f"{url}?pageToken={quote(page_token, safe='')}" if page_token else url
+            )
+            budgets.extend(
+                self._normalize_budget(budget) for budget in data.get("budgets", [])
+            )
             page_token = data.get("nextPageToken")
             if not page_token:
                 return budgets
@@ -91,7 +104,11 @@ class GCPBillingAdapter(BillingAdapter):
                 updates.append(self._normalize_update(received["message"]))
             except (KeyError, TypeError, ValueError) as exc:
                 # Acknowledged anyway, or it would come back on every pull
-                logger.warning("Ignoring malformed budget notification %s: %s", received["message"].get("messageId"), exc)
+                logger.warning(
+                    "Ignoring malformed budget notification %s: %s",
+                    received["message"].get("messageId"),
+                    exc,
+                )
         return updates, ack_ids
 
     def replay_budget_updates(self, subscription: str, since: datetime) -> None:
@@ -106,7 +123,10 @@ class GCPBillingAdapter(BillingAdapter):
         )
 
     def acknowledge(self, subscription: str, ack_ids: list[str]) -> None:
-        self.client.post(PUBSUB_URL.format(subscription=subscription, action="acknowledge"), {"ackIds": ack_ids})
+        self.client.post(
+            PUBSUB_URL.format(subscription=subscription, action="acknowledge"),
+            {"ackIds": ack_ids},
+        )
 
     def _normalize_budget(self, budget: dict) -> dict:
         budget_filter = budget.get("budgetFilter", {})
@@ -120,13 +140,18 @@ class GCPBillingAdapter(BillingAdapter):
             "amount": _money(amount) if amount else None,
             "currency": amount.get("currencyCode", "") if amount else "",
             # A budget with neither period tracks the calendar month
-            "period": Budget.Period.CUSTOM if custom else CALENDAR_PERIODS.get(
+            "period": Budget.Period.CUSTOM
+            if custom
+            else CALENDAR_PERIODS.get(
                 budget_filter.get("calendarPeriod"), Budget.Period.MONTH
             ),
             "start_date": _date(custom.get("startDate")) if custom else None,
             "end_date": _date(custom.get("endDate")) if custom else None,
             "credit_treatment": budget_filter.get("creditTypesTreatment", ""),
-            "projects": [project.removeprefix("projects/") for project in budget_filter.get("projects", [])],
+            "projects": [
+                project.removeprefix("projects/")
+                for project in budget_filter.get("projects", [])
+            ],
             "has_other_filters": any(budget_filter.get(key) for key in OTHER_FILTERS),
             "pubsub_topic": budget.get("notificationsRule", {}).get("pubsubTopic", ""),
         }
