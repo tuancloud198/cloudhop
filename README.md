@@ -31,7 +31,7 @@ Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 | `common/` | Shared code: cloud errors, the provider adapter registry, the GCP and Kubernetes clients |
 | `frontend/` | Vue 3 + Vite UI |
 
-The backend is Django with Django REST Framework, serving `/api/v1/`, with PostgreSQL for storage and Celery (with Redis) for background syncs. Each app reaches the provider through its own adapters in `<app>/adapters/`, one per provider. See [AGENTS.md](AGENTS.md) for the code layout rules.
+The backend is Django with Django REST Framework, serving `/api/v1/`, with PostgreSQL for storage and Celery (with Redis) for background syncs. The tables are in [docs/erd.md](docs/erd.md). Each app reaches the provider through its own adapters in `<app>/adapters/`, one per provider. See [AGENTS.md](AGENTS.md) for the code layout rules.
 
 ## Running it
 
