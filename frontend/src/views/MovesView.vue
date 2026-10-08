@@ -5,7 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '../components/AppIcon.vue'
 import { accounts } from '../accounts.js'
 import { api } from '../api.js'
-import { STEP_LABELS, movableNamespace, statusTone } from '../moves.js'
+import { METHOD_LABELS, STEP_LABELS, movableNamespace, statusTone } from '../moves.js'
 import { dateTime, timeAgo } from '../format.js'
 import { notify } from '../toasts.js'
 
@@ -23,6 +23,8 @@ const form = reactive({
   source: route.query.source ? Number(route.query.source) : null,
   target: null,
   namespaces: [],
+  // Manifests only needs nothing installed; Velero also copies volumes
+  method: 'manifests',
   mode: 'cutover',
   // Source storage class -> target storage class
   mapping: {},
@@ -40,14 +42,19 @@ const byAccount = computed(() =>
     .map((account) => ({ account, clusters: clusters.value.filter((cluster) => cluster.account_id === account.id) }))
     .filter((group) => group.clusters.length),
 )
-const storageClasses = computed(() => [
+const velero = computed(() => form.method === 'velero')
+const storageClasses = computed(() => velero.value ? [
   ...new Set(form.namespaces.flatMap((namespace) => claimClasses.value[namespace] ?? [])),
-].sort())
+].sort() : [])
 const canCreate = computed(() => form.source && form.target && form.namespaces.length && !creating.value)
 
 loadMoves()
 watch(() => accounts.items, loadClusters, { immediate: true })
 watch(() => form.source, loadSource, { immediate: true })
+// Manifests-only moves copy no volumes, so namespaces with any cannot go
+watch(() => form.method, () => {
+  form.namespaces = form.namespaces.filter((namespace) => !hasVolumes(namespace))
+})
 watch(storageClasses, (classes) => {
   for (const name of classes) form.mapping[name] ??= name
 })
@@ -106,6 +113,7 @@ async function createMove() {
       source_cluster: form.source,
       target_cluster: form.target,
       namespaces: form.namespaces,
+      method: form.method,
       mode: form.mode,
       storage_class_mapping: Object.fromEntries(storageClasses.value.map((name) => [name, form.mapping[name].trim()])),
       storage_location: form.storageLocation.trim() || 'default',
@@ -119,6 +127,10 @@ async function createMove() {
   }
 }
 
+function hasVolumes(namespace) {
+  return !velero.value && Boolean(claimClasses.value[namespace])
+}
+
 function clusterLabel(cluster) {
   return `${cluster.name} · ${cluster.account_name}`
 }
@@ -130,9 +142,9 @@ function clusterLabel(cluster) {
       <div>
         <h1>Moves</h1>
         <p class="muted intro">
-          Copy namespaces, with their objects and volume data, to a cluster in another account. Velero does the copy
-          through a bucket in the target account.
-          <RouterLink :to="{ name: 'guide', hash: '#gcp-moves' }">Set up Velero first</RouterLink>
+          Copy namespaces to a cluster in another account: their objects only, applied by CloudHop, or with their
+          volume data through Velero.
+          <RouterLink :to="{ name: 'guide', hash: '#gcp-moves' }">What each needs</RouterLink>
         </p>
       </div>
       <div class="actions">
@@ -189,8 +201,13 @@ function clusterLabel(cluster) {
             No namespaces of yours found. Use <strong>Refresh resources</strong> on the source cluster, then come back.
           </div>
           <div v-else class="choices">
-            <label v-for="namespace in sourceNamespaces" :key="namespace" class="choice">
-              <input v-model="form.namespaces" type="checkbox" :value="namespace" />
+            <label
+              v-for="namespace in sourceNamespaces"
+              :key="namespace"
+              class="choice"
+              :title="hasVolumes(namespace) ? 'Has volumes: move it with Velero' : null"
+            >
+              <input v-model="form.namespaces" type="checkbox" :value="namespace" :disabled="hasVolumes(namespace)" />
               <span class="mono">{{ namespace }}</span>
               <span v-if="claimClasses[namespace]" class="badge plain">
                 {{ claimClasses[namespace].length }} volume{{ claimClasses[namespace].length === 1 ? '' : 's' }}
@@ -201,20 +218,46 @@ function clusterLabel(cluster) {
         </fieldset>
 
         <fieldset class="field">
-          <legend>Mode</legend>
+          <legend>How</legend>
+          <label class="choice block">
+            <input v-model="form.method" type="radio" value="manifests" />
+            <span>
+              <strong>Manifests only</strong>: CloudHop reads the namespaces' objects from the source and applies them
+              to the target. Nothing to install, but no volume data and no custom resources; namespaces with
+              volumes cannot be chosen.
+            </span>
+          </label>
+          <label class="choice block">
+            <input v-model="form.method" type="radio" value="velero" />
+            <span>
+              <strong>Velero</strong>: copies every object and the volumes' data through a bucket in the target
+              account. Needs Velero in both clusters.
+            </span>
+          </label>
+        </fieldset>
+
+        <fieldset class="field">
+          <legend>Source</legend>
           <label class="choice block">
             <input v-model="form.mode" type="radio" value="cutover" />
-            <span>
-              <strong>Cutover</strong> (recommended): scales the source workloads to 0 before the backup, then starts
-              them in the target. The data is consistent; the app is down until the target is ready. The source is
-              left scaled down, not deleted.
+            <span v-if="velero">
+              <strong>Cutover</strong>: scales the source workloads to 0 before the backup, then starts them in the
+              target. The data is consistent; the app is down until the target is ready. The source is left scaled
+              down, not deleted.
+            </span>
+            <span v-else>
+              <strong>Cutover</strong>: once the target's workloads are ready, scales the source's to 0. No downtime;
+              the source is left scaled down, not deleted.
             </span>
           </label>
           <label class="choice block">
             <input v-model="form.mode" type="radio" value="copy" />
-            <span>
-              <strong>Copy</strong>: backs up while the source keeps running, so both run afterwards. Volumes of
-              running databases may be copied mid-write; use it to try a move.
+            <span v-if="velero">
+              <strong>Keep running</strong>: backs up while the source keeps running, so both run afterwards. Volumes
+              of running databases may be copied mid-write; use it to try a move.
+            </span>
+            <span v-else>
+              <strong>Keep running</strong>: leaves the source untouched, so both run afterwards.
             </span>
           </label>
         </fieldset>
@@ -229,7 +272,7 @@ function clusterLabel(cluster) {
           </div>
         </fieldset>
 
-        <details class="advanced">
+        <details v-if="velero" class="advanced">
           <summary>Advanced</summary>
           <div class="field">
             <label for="move-location">Velero storage location</label>
@@ -273,7 +316,7 @@ function clusterLabel(cluster) {
               <th>From</th>
               <th>To</th>
               <th>Namespaces</th>
-              <th>Mode</th>
+              <th>How</th>
               <th>Status</th>
               <th>Started</th>
             </tr>
@@ -291,7 +334,7 @@ function clusterLabel(cluster) {
               <td>{{ clusterLabel(move.source_cluster) }}</td>
               <td>{{ clusterLabel(move.target_cluster) }}</td>
               <td class="mono">{{ move.namespaces.join(', ') }}</td>
-              <td>{{ move.mode }}</td>
+              <td>{{ METHOD_LABELS[move.method] }} · {{ move.mode === 'copy' ? 'keep running' : 'cutover' }}</td>
               <td><span class="badge" :class="statusTone(move.status)">{{ STEP_LABELS[move.status] }}</span></td>
               <td :title="dateTime(move.created_at)">{{ timeAgo(move.created_at) }}</td>
             </tr>

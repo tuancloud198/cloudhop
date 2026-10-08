@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import AppIcon from '../components/AppIcon.vue'
 import { api } from '../api.js'
-import { FINISHED, STEP_LABELS, statusTone } from '../moves.js'
+import { FINISHED, METHOD_LABELS, STEP_LABELS, statusTone } from '../moves.js'
 import { dateTime, timeAgo } from '../format.js'
 import { notify } from '../toasts.js'
 
@@ -103,7 +103,8 @@ async function act(action, label) {
             </RouterLink>
             <span class="muted">({{ move.target_cluster.account_name }})</span>
             <span>Namespaces <code>{{ move.namespaces.join(', ') }}</code></span>
-            <span class="badge plain">{{ move.mode }}</span>
+            <span class="badge plain">{{ METHOD_LABELS[move.method] }}</span>
+            <span class="badge plain">{{ move.mode === 'copy' ? 'keep running' : 'cutover' }}</span>
           </div>
         </div>
         <div class="actions">
@@ -163,19 +164,25 @@ async function act(action, label) {
       <section class="card">
         <div class="section-header"><h2>Details</h2></div>
         <dl class="facts">
-          <dt>Velero backup</dt>
-          <dd class="mono">{{ move.backup_name || '–' }}</dd>
-          <dt>Velero restore</dt>
-          <dd class="mono">{{ move.restore_name || '–' }}</dd>
-          <dt>Storage location</dt>
-          <dd class="mono">{{ move.storage_location }}</dd>
-          <dt>Storage classes</dt>
-          <dd>
-            <span v-if="!mapping.length" class="muted">same names in the target</span>
-            <span v-for="[from, to] in mapping" :key="from" class="mono pair">{{ from }} → {{ to }}</span>
-          </dd>
+          <template v-if="move.method === 'velero'">
+            <dt>Velero backup</dt>
+            <dd class="mono">{{ move.backup_name || '–' }}</dd>
+            <dt>Velero restore</dt>
+            <dd class="mono">{{ move.restore_name || '–' }}</dd>
+            <dt>Storage location</dt>
+            <dd class="mono">{{ move.storage_location }}</dd>
+            <dt>Storage classes</dt>
+            <dd>
+              <span v-if="!mapping.length" class="muted">same names in the target</span>
+              <span v-for="[from, to] in mapping" :key="from" class="mono pair">{{ from }} → {{ to }}</span>
+            </dd>
+          </template>
+          <template v-else>
+            <dt>Copied</dt>
+            <dd>Objects of built-in kinds, applied by CloudHop; no volume data</dd>
+          </template>
           <template v-if="replicas.length">
-            <dt>Replicas before the cutover</dt>
+            <dt>Source replicas before the cutover</dt>
             <dd>
               <span v-for="[key, count] in replicas" :key="key" class="mono pair">{{ key }}: {{ count }}</span>
             </dd>

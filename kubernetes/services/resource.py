@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 # The API server labels the APIService of each built-in group version "onstart";
 # CRD groups get "true" and aggregated APIs (e.g. metrics.k8s.io) get no label
 NATIVE_LABEL = "kube-aggregator.kubernetes.io/automanaged"
+BUILT_IN, CUSTOM = "onstart", "true"
 
 # Set by the API server, meaningless on another cluster
 SERVER_METADATA = {
@@ -129,13 +130,25 @@ def list_native_resource_types(
 
     Kinds whose (group, resource) is in skipped are left out.
 
-    Each dict has group, version, kind, namespaced and path (the list URL).
+    Each dict has group, version, kind, resource, namespaced, base (the group
+    version's path) and path (the list URL).
     """
+    return _resource_types(kube, BUILT_IN, skipped)
+
+
+def list_custom_resource_types(kube: KubeClient) -> list[dict]:
+    """Return the listable kinds of the cluster's CustomResourceDefinitions, shaped as list_native_resource_types."""
+    return _resource_types(kube, CUSTOM, frozenset())
+
+
+def _resource_types(
+    kube: KubeClient, label: str, skipped: frozenset[tuple[str, str]]
+) -> list[dict]:
     apiservices = kube.get("/apis/apiregistration.k8s.io/v1/apiservices")["items"]
-    native_versions = {
+    served_versions = {
         (service["spec"].get("group", ""), service["spec"]["version"])
         for service in apiservices
-        if service["metadata"].get("labels", {}).get(NATIVE_LABEL) == "onstart"
+        if service["metadata"].get("labels", {}).get(NATIVE_LABEL) == label
     }
 
     group_versions = [("", "v1")] + [
@@ -145,7 +158,7 @@ def list_native_resource_types(
 
     resource_types = []
     for group, version in group_versions:
-        if (group, version) not in native_versions:
+        if (group, version) not in served_versions:
             continue
         base = f"/apis/{group}/{version}" if group else f"/api/{version}"
         for resource in kube.get(base)["resources"]:
@@ -160,7 +173,9 @@ def list_native_resource_types(
                     "group": group,
                     "version": version,
                     "kind": resource["kind"],
+                    "resource": resource["name"],
                     "namespaced": resource["namespaced"],
+                    "base": base,
                     "path": f"{base}/{resource['name']}",
                 }
             )
@@ -177,13 +192,13 @@ def _to_row(cluster: Clusters, resource_type: dict, item: dict) -> KubeResource:
         namespace=metadata.get("namespace", ""),
         name=metadata["name"],
         uid=metadata.get("uid", ""),
-        manifest=_clean_manifest(resource_type, item),
+        manifest=clean_manifest(resource_type, item),
         status=item.get("status") or {},
         kube_created_at=parse_datetime(metadata.get("creationTimestamp") or ""),
     )
 
 
-def _clean_manifest(resource_type: dict, item: dict) -> dict:
+def clean_manifest(resource_type: dict, item: dict) -> dict:
     """Strip what the API server sets, keeping what is needed to re-create the object."""
     group, version = resource_type["group"], resource_type["version"]
     # Items in a list response carry no apiVersion or kind

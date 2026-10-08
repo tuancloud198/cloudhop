@@ -20,7 +20,7 @@ class KubeAPIError(CloudAPIError):
 
 
 class KubeClient:
-    """Calls a Kubernetes API server with a bearer token. Reads, plus the few writes moves need.
+    """Calls a Kubernetes API server with a bearer token. Reads, plus the writes moves need.
 
     Use as a context manager: the CA certificate is written to a temp file for
     the lifetime of the client, since requests only verifies against a file.
@@ -65,6 +65,16 @@ class KubeClient:
         """
         return self._request(
             "PATCH", path, data=json.dumps(body), headers={"Content-Type": "application/merge-patch+json"}
+        )
+
+    def apply(self, path: str, body: dict, field_manager: str) -> dict:
+        """Server-side apply body to the object at path, creating it if missing, and return it.
+
+        Fields another manager set are taken over (force). Raises KubeAPIError if the call fails.
+        """
+        return self._request(
+            "PATCH", path, data=json.dumps(body), params={"fieldManager": field_manager, "force": "true"},
+            headers={"Content-Type": "application/apply-patch+yaml"},
         )
 
     def _request(self, method: str, path: str, **kwargs) -> dict:

@@ -115,8 +115,9 @@ erDiagram
         bigint source_cluster_id FK "clusters_clusters"
         bigint target_cluster_id FK "clusters_clusters; never the source"
         jsonb namespaces
-        varchar mode "cutover, copy"
-        jsonb storage_class_mapping "source class to target class"
+        varchar method "velero, manifests"
+        varchar mode "cutover, copy (source keeps running)"
+        jsonb storage_class_mapping "Velero: source class to target class"
         varchar storage_location "Velero BackupStorageLocation"
         varchar status "pending ... done, failed, cancelled"
         text waiting_on

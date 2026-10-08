@@ -2,16 +2,24 @@ from django.db import models
 
 
 class Move(models.Model):
-    """Copies the objects and volume data of namespaces from one cluster to another with Velero.
+    """Copies the objects of namespaces from one cluster to another: with their volume data
+    through Velero, or only their manifests, applied by CloudHop itself.
 
     A move goes through its steps in order (see Status); a Celery task runs the current
     step until it is done, then the next one.
     """
 
+    class Method(models.TextChoices):
+        # Velero backs the namespaces up into a bucket and restores them: objects and volume data
+        VELERO = "velero", "Velero"
+        # CloudHop reads the objects from the source and applies them to the target; no volumes
+        MANIFESTS = "manifests", "Manifests only"
+
     class Mode(models.TextChoices):
-        # Stops the source workloads before the last backup: consistent data, some downtime
+        # Scales the source workloads to 0: before the backup with Velero (consistent data, some
+        # downtime), after the target is ready with manifests (no downtime)
         CUTOVER = "cutover", "Cutover"
-        # Backs up while the source runs: crash-consistent data, no downtime
+        # Leaves the source running, so both run afterwards
         COPY = "copy", "Copy"
 
     class Status(models.TextChoices):
@@ -20,6 +28,7 @@ class Move(models.Model):
         SCALING_DOWN = "scaling_down", "Scaling down the source"
         BACKING_UP = "backing_up", "Backing up"
         RESTORING = "restoring", "Restoring"
+        COPYING = "copying", "Copying manifests"
         SCALING_UP = "scaling_up", "Scaling up the target"
         VERIFYING = "verifying", "Verifying"
         DONE = "done", "Done"
@@ -29,6 +38,7 @@ class Move(models.Model):
     source_cluster = models.ForeignKey("clusters.Clusters", on_delete=models.CASCADE, related_name="moves_out")
     target_cluster = models.ForeignKey("clusters.Clusters", on_delete=models.CASCADE, related_name="moves_in")
     namespaces = models.JSONField(default=list)
+    method = models.CharField(max_length=20, choices=Method.choices, default=Method.VELERO)
     mode = models.CharField(max_length=20, choices=Mode.choices, default=Mode.CUTOVER)
     # Source storage class name -> target storage class name, for classes the target names differently
     storage_class_mapping = models.JSONField(default=dict, blank=True)

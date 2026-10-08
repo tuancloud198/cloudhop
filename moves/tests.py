@@ -28,6 +28,7 @@ class FakeKube:
         self.lists = {}
         self.posts = []
         self.patches = []
+        self.applies = []
 
     def get(self, path, params=None):
         return self._answer(self.responses, path, NOT_FOUND)
@@ -41,6 +42,13 @@ class FakeKube:
 
     def patch(self, path, body):
         self.patches.append((path, body))
+        return body
+
+    def apply(self, path, body, field_manager):
+        answer = self.responses.get(f"apply {path}")
+        if isinstance(answer, Exception):
+            raise answer
+        self.applies.append((path, body))
         return body
 
     def _answer(self, answers, path, missing):
@@ -58,6 +66,38 @@ def velero_ready(kube, read_only=False, bucket="cloudhop-moves"):
         "spec": {"objectStorage": {"bucket": bucket}, **({"accessMode": "ReadOnly"} if read_only else {})},
         "status": {"phase": "Available"},
     }
+
+
+def serves(kube, kinds, custom=()):
+    """Discovery of the given built-in kinds, and custom ones, as (group, resource, kind, namespaced)."""
+    groups = {}
+    for group, resource, kind, namespaced, label in [(*k, "onstart") for k in kinds] + [(*k, "true") for k in custom]:
+        groups.setdefault((group, label), []).append(
+            {"name": resource, "kind": kind, "namespaced": namespaced, "verbs": ["get", "list"]}
+        )
+    kube.responses["/apis/apiregistration.k8s.io/v1/apiservices"] = {"items": [
+        {"spec": {"group": group, "version": "v1"},
+         "metadata": {"labels": {"kube-aggregator.kubernetes.io/automanaged": label}}}
+        for group, label in groups
+    ]}
+    kube.responses["/apis"] = {"groups": [
+        {"name": group, "preferredVersion": {"version": "v1"}} for group, _ in groups if group
+    ]}
+    for (group, _), resources in groups.items():
+        kube.responses[f"/apis/{group}/v1" if group else "/api/v1"] = {"resources": resources}
+
+
+CORE_KINDS = [
+    ("", "namespaces", "Namespace", False),
+    ("", "secrets", "Secret", True),
+    ("", "configmaps", "ConfigMap", True),
+    ("", "services", "Service", True),
+    ("", "serviceaccounts", "ServiceAccount", True),
+    ("", "persistentvolumeclaims", "PersistentVolumeClaim", True),
+    ("apps", "deployments", "Deployment", True),
+    ("apps", "replicasets", "ReplicaSet", True),
+    ("batch", "jobs", "Job", True),
+]
 
 
 class MoveTestCase(APITestCase):
@@ -285,6 +325,154 @@ class MoveCheckTests(MoveTestCase):
         self.check_fails("no VolumeSnapshotClass labelled velero.io/csi-volumesnapshot-class=true")
 
 
+class ManifestMoveTests(MoveTestCase):
+    def ready_to_copy(self):
+        """A shop namespace in the source only, with a few objects and no volumes."""
+        source = self.kubes["source"]
+        serves(source, CORE_KINDS)
+        source.responses["/api/v1/namespaces/shop"] = {
+            "metadata": {"name": "shop", "uid": "u1", "labels": {"team": "a"}},
+            "spec": {"finalizers": ["kubernetes"]}, "status": {"phase": "Active"},
+        }
+        meta = lambda name, **extra: {"name": name, "namespace": "shop", "uid": "x", "resourceVersion": "9", **extra}
+        source.lists["/api/v1/namespaces/shop/secrets"] = [{"metadata": meta("db"), "data": {"password": "cw=="}}]
+        source.lists["/api/v1/namespaces/shop/configmaps"] = [
+            {"metadata": meta("kube-root-ca.crt"), "data": {}},
+            {"metadata": meta("settings"), "data": {"mode": "live"}},
+        ]
+        source.lists["/api/v1/namespaces/shop/services"] = [{
+            "metadata": meta("web"),
+            "spec": {"type": "NodePort", "clusterIP": "10.0.0.7", "clusterIPs": ["10.0.0.7"],
+                     "ports": [{"port": 80, "nodePort": 31000}]},
+        }]
+        source.lists["/api/v1/namespaces/shop/serviceaccounts"] = [{"metadata": meta("default")}]
+        source.lists["/apis/apps/v1/namespaces/shop/deployments"] = [{
+            "metadata": meta("web", annotations={"deployment.kubernetes.io/revision": "3"}, finalizers=["x"]),
+            "spec": {"replicas": 2}, "status": {"readyReplicas": 2},
+        }]
+        source.lists["/apis/apps/v1/namespaces/shop/replicasets"] = [
+            {"metadata": meta("web-abc", ownerReferences=[{"kind": "Deployment", "name": "web"}])}
+        ]
+        source.lists["/apis/batch/v1/namespaces/shop/jobs"] = [{
+            "metadata": meta("migrate"), "spec": {"selector": {}},
+            "status": {"conditions": [{"type": "Complete", "status": "True"}]},
+        }]
+
+    def manifest_move(self, mode=Move.Mode.COPY):
+        return self.move(mode=mode, method=Move.Method.MANIFESTS)
+
+    def test_copy_applies_the_objects_in_order_and_leaves_the_source_running(self):
+        self.ready_to_copy()
+        source, target = self.kubes["source"], self.kubes["target"]
+        move = self.manifest_move()
+
+        self.assertIsNone(self.advance_until_waiting(move))
+
+        self.assertEqual(move.status, Move.Status.DONE)
+        self.assertEqual([path for path, _ in target.applies], [
+            "/api/v1/namespaces/shop",
+            "/api/v1/namespaces/shop/secrets/db",
+            "/api/v1/namespaces/shop/configmaps/settings",
+            "/api/v1/namespaces/shop/services/web",
+            "/apis/apps/v1/namespaces/shop/deployments/web",
+        ])
+        namespace, _, _, service, deployment = (body for _, body in target.applies)
+        self.assertEqual(namespace, {"apiVersion": "v1", "kind": "Namespace",
+                                     "metadata": {"name": "shop", "labels": {"team": "a"}}})
+        self.assertEqual(service["spec"], {"type": "NodePort", "ports": [{"port": 80}]})
+        self.assertEqual(deployment["metadata"], {"name": "web", "namespace": "shop"})
+        self.assertEqual(deployment["spec"], {"replicas": 2})
+        self.assertEqual((source.posts, source.patches, source.applies), ([], [], []))
+        messages = [event.message for event in move.events.all()]
+        self.assertIn("Checked: 6 objects to copy, no volumes", messages)
+        self.assertIn("Not copied, since they already finished: Job shop/migrate", messages)
+        self.assertIn("Applied 5 objects in the target: 1 ConfigMap, 1 Deployment, 1 Namespace, 1 Secret, 1 Service",
+                      messages)
+
+    def test_cutover_scales_the_source_down_once_the_target_is_ready(self):
+        self.ready_to_copy()
+        source, target = self.kubes["source"], self.kubes["target"]
+        target.lists["/apis/apps/v1/namespaces/shop/deployments"] = [
+            {"metadata": {"name": "web"}, "spec": {"replicas": 2}, "status": {"readyReplicas": 0}}
+        ]
+        scale = "/apis/apps/v1/namespaces/shop/deployments/web/scale"
+        source.responses[scale] = [{"spec": {"replicas": 2}, "status": {"replicas": 2}}, {"spec": {"replicas": 0}}]
+        move = self.manifest_move(mode=Move.Mode.CUTOVER)
+
+        self.advance_until_waiting(move)
+        self.assertEqual((move.status, source.patches), (Move.Status.VERIFYING, []))
+
+        target.lists["/apis/apps/v1/namespaces/shop/deployments"][0]["status"]["readyReplicas"] = 2
+        self.advance_until_waiting(move)
+        self.assertEqual((move.status, move.replicas), (Move.Status.SCALING_DOWN, {"shop/Deployment/web": 2}))
+        self.assertEqual(source.patches, [(scale, {"spec": {"replicas": 0}})])
+
+        self.assertIsNone(self.advance_until_waiting(move))
+        self.assertEqual(move.status, Move.Status.DONE)
+
+    def test_needs_no_velero(self):
+        self.ready_to_copy()
+        move = self.manifest_move()
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.status, Move.Status.DONE)
+        self.assertNotIn("/apis/velero.io/v1", self.kubes["source"].responses)
+
+    def test_refuses_volumes(self):
+        self.ready_to_copy()
+        self.kubes["source"].lists["/api/v1/namespaces/shop/persistentvolumeclaims"] = [
+            {"metadata": {"name": "data", "namespace": "shop"}, "spec": {}}
+        ]
+        move = self.manifest_move()
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual((move.status, move.failed_step), (Move.Status.FAILED, Move.Status.CHECKING))
+        self.assertIn("have PersistentVolumeClaims: shop/data", move.error)
+        self.assertEqual(self.kubes["target"].applies, [])
+
+    def test_refuses_custom_resources(self):
+        self.ready_to_copy()
+        source = self.kubes["source"]
+        serves(source, CORE_KINDS, custom=[("example.com", "widgets", "Widget", True)])
+        source.lists["/apis/example.com/v1/namespaces/shop/widgets"] = [{"metadata": {"name": "w", "namespace": "shop"}}]
+        move = self.manifest_move()
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.status, Move.Status.FAILED)
+        self.assertIn("have custom resources: Widget shop/w", move.error)
+
+    def test_unreadable_kind_fails_the_check(self):
+        self.ready_to_copy()
+        self.kubes["source"].lists["/api/v1/namespaces/shop/secrets"] = KubeAPIError("permission denied", 403)
+        move = self.manifest_move()
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.status, Move.Status.FAILED)
+        self.assertIn("CloudHop cannot read Secret objects in the source", move.error)
+
+    def test_failed_apply_is_retried(self):
+        self.ready_to_copy()
+        target = self.kubes["target"]
+        target.responses["apply /api/v1/namespaces/shop/secrets/db"] = KubeAPIError("permission denied", 403)
+        move = self.manifest_move()
+
+        self.advance_until_waiting(move)
+        self.assertEqual((move.status, move.failed_step), (Move.Status.FAILED, Move.Status.COPYING))
+        self.assertIn("Could not apply 1 object in the target: Secret shop/db: permission denied", move.error)
+
+        del target.responses["apply /api/v1/namespaces/shop/secrets/db"]
+        target.applies.clear()
+        retry_move(move.pk)
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.status, Move.Status.DONE)
+        self.assertEqual(len(target.applies), 5)
+
+
 class MoveApiTests(MoveTestCase):
     def test_start_a_move(self):
         with mock.patch.object(advance_move, "delay") as delay, self.captureOnCommitCallbacks(execute=True):
@@ -299,6 +487,22 @@ class MoveApiTests(MoveTestCase):
         self.assertEqual(response.data["steps"][1], "scaling_down")
         self.assertIn("Created: shop from source to target", response.data["events"][0]["message"])
         delay.assert_called_once_with(response.data["id"])
+
+    def test_start_a_manifests_only_move(self):
+        with mock.patch.object(advance_move, "delay"), self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post("/api/v1/moves/", {
+                "source_cluster": self.source_cluster.pk,
+                "target_cluster": self.target_cluster.pk,
+                "namespaces": ["shop"],
+                "method": "manifests",
+                "mode": "copy",
+                "storage_class_mapping": {"standard": "fast"},
+            }, format="json")
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["method"], "manifests")
+        self.assertEqual(response.data["steps"], ["checking", "copying", "verifying"])
+        self.assertEqual(response.data["storage_class_mapping"], {})
 
     def test_rejects_moving_within_one_cluster(self):
         response = self.client.post("/api/v1/moves/", {

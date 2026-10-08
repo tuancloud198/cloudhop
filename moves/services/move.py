@@ -11,6 +11,7 @@ from clusters.models.cluster import Clusters
 from common.cloud.errors import CloudAPIError
 from common.kube.client import KubeAPIError, KubeClient
 from kubernetes.adapters.base import KubeAccessAdapter
+from kubernetes.services.resource import clean_manifest, list_custom_resource_types, list_native_resource_types
 from moves.models.move import Move
 from moves.models.move_event import MoveEvent
 
@@ -22,7 +23,7 @@ Status = Move.Status
 # Statuses of a move that is still going; PENDING has not run its first step yet
 ACTIVE = (
     Status.PENDING, Status.CHECKING, Status.SCALING_DOWN, Status.BACKING_UP,
-    Status.RESTORING, Status.SCALING_UP, Status.VERIFYING,
+    Status.RESTORING, Status.COPYING, Status.SCALING_UP, Status.VERIFYING,
 )
 FINISHED = (Status.DONE, Status.FAILED, Status.CANCELLED)
 
@@ -52,6 +53,20 @@ FAILED_PHASES = {"Failed", "FailedValidation", "PartiallyFailed"}
 WORKLOADS = (("Deployment", "deployments"), ("StatefulSet", "statefulsets"))
 DNS_LABEL = re.compile(r"[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?")
 
+# Manifests-only moves: the field manager CloudHop applies objects as in the target
+FIELD_MANAGER = "cloudhop"
+NAMESPACE_TYPE = {"group": "", "version": "v1", "kind": "Namespace", "resource": "namespaces", "base": "/api/v1"}
+# Applied first, in this order, so the objects that use them find them; then every other kind,
+# then the workloads and what points at them
+APPLY_FIRST = ("Namespace", "ServiceAccount", "Secret", "ConfigMap", "LimitRange", "ResourceQuota", "Role",
+               "RoleBinding", "NetworkPolicy", "Service")
+APPLY_LAST = ("Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job", "Pod", "HorizontalPodAutoscaler",
+              "PodDisruptionBudget", "Ingress")
+# Set by the cluster on objects it runs; meaningless or conflicting in another cluster
+CLUSTER_ANNOTATIONS = {"deployment.kubernetes.io/revision", "cloud.google.com/neg-status",
+                       "kubernetes.io/service-account.uid"}
+JOB_LABELS = ("controller-uid", "batch.kubernetes.io/controller-uid")
+
 DONE, WAIT = "done", "wait"
 
 
@@ -63,9 +78,13 @@ class MoveError(Exception):
     """A step cannot go on; the move fails with this message, which is safe to show to the user."""
 
 
-def steps_of(mode: str) -> list[str]:
-    """The statuses a move in this mode goes through, in order."""
-    if mode == Move.Mode.CUTOVER:
+def steps_of(method: str, mode: str) -> list[str]:
+    """The statuses a move of this method and mode goes through, in order."""
+    cutover = mode == Move.Mode.CUTOVER
+    if method == Move.Method.MANIFESTS:
+        # Nothing to keep consistent, so the source runs until the target is ready
+        return [Status.CHECKING, Status.COPYING, Status.VERIFYING] + ([Status.SCALING_DOWN] if cutover else [])
+    if cutover:
         return [Status.CHECKING, Status.SCALING_DOWN, Status.BACKING_UP, Status.RESTORING,
                 Status.SCALING_UP, Status.VERIFYING]
     return [Status.CHECKING, Status.BACKING_UP, Status.RESTORING, Status.VERIFYING]
@@ -75,6 +94,7 @@ def create_move(
     source_cluster: Clusters,
     target_cluster: Clusters,
     namespaces: list[str],
+    method: str = Move.Method.VELERO,
     mode: str = Move.Mode.CUTOVER,
     storage_class_mapping: dict | None = None,
     storage_location: str = "default",
@@ -111,11 +131,17 @@ def create_move(
         source_cluster=source_cluster,
         target_cluster=target_cluster,
         namespaces=namespaces,
+        method=method,
         mode=mode,
-        storage_class_mapping={k: v for k, v in (storage_class_mapping or {}).items() if k != v},
+        # Velero's alone; a manifests-only move copies no volumes
+        storage_class_mapping={} if method == Move.Method.MANIFESTS else {
+            k: v for k, v in (storage_class_mapping or {}).items() if k != v
+        },
         storage_location=storage_location,
     )
-    _log(move, f"Created: {', '.join(namespaces)} from {source_cluster.name} to {target_cluster.name}, {mode} mode")
+    how = "manifests only" if method == Move.Method.MANIFESTS else "with Velero"
+    _log(move, f"Created: {', '.join(namespaces)} from {source_cluster.name} to {target_cluster.name}, "
+               f"{how}, {mode} mode")
     return move
 
 
@@ -148,7 +174,7 @@ def advance(move_id: int) -> int | None:
             move.save()
             return POLL_SECONDS
 
-        steps = steps_of(move.mode)
+        steps = steps_of(move.method, move.mode)
         following = steps[steps.index(move.status) + 1:]
         if not following:
             move.status, move.waiting_on, move.finished_at = Status.DONE, "", move.checked_at
@@ -172,8 +198,8 @@ def cancel_move(move_id: int) -> Move:
         move.status, move.waiting_on, move.finished_at = Status.CANCELLED, "", timezone.now()
         move.save()
         left = "The source workloads stay scaled down; scale them up to use them again. " if move.replicas else ""
-        _log(move, f"Cancelled during {Status(step).label.lower()}. {left}Velero backups or restores already "
-                   f"started keep running.", step=step)
+        velero = "Velero backups or restores already started keep running." if move.method == Move.Method.VELERO else ""
+        _log(move, f"Cancelled during {Status(step).label.lower()}. {left}{velero}".strip(), step=step)
     return move
 
 
@@ -204,7 +230,14 @@ def retry_move(move_id: int) -> Move:
 # They check what is already done first, so running one again is safe.
 
 def _check(move: Move) -> str:
-    """Both clusters can take part: Velero ready on one bucket, namespaces free, storage classes known."""
+    """Both clusters can take part: namespaces in the source only, and what the method needs."""
+    if move.method == Move.Method.MANIFESTS:
+        return _check_manifests(move)
+    return _check_velero(move)
+
+
+def _check_velero(move: Move) -> str:
+    """Velero ready on one bucket, namespaces free, storage classes known."""
     with _kube(move.source_cluster) as source, _kube(move.target_cluster) as target:
         locations = {}
         for side, kube in (("source", source), ("target", target)):
@@ -227,13 +260,7 @@ def _check(move: Move) -> str:
 
         classes, claims = set(), 0
         for namespace in move.namespaces:
-            if not _exists(source, f"/api/v1/namespaces/{namespace}"):
-                raise MoveError(f"Namespace {namespace} does not exist in the source cluster.")
-            if _exists(target, f"/api/v1/namespaces/{namespace}"):
-                raise MoveError(
-                    f"Namespace {namespace} already exists in the target cluster. Velero leaves objects that "
-                    f"already exist alone, so delete it there first, or leave it out of the move."
-                )
+            _check_namespace(source, target, namespace)
             for claim in source.list(f"/api/v1/namespaces/{namespace}/persistentvolumeclaims"):
                 classes.add(claim["spec"].get("storageClassName") or "")
                 claims += 1
@@ -258,6 +285,67 @@ def _check(move: Move) -> str:
 
     _log(move, f"Checked: Velero is ready in both clusters on bucket {buckets['source'].get('bucket')}; "
                f"{claims} volume{'s' if claims != 1 else ''} to copy")
+    return DONE
+
+
+def _check_manifests(move: Move) -> str:
+    """Namespaces free, no volumes, no custom resources, and every object readable."""
+    adapter = KubeAccessAdapter.for_account(move.source_cluster.account_id)
+    with _kube(move.source_cluster) as source, _kube(move.target_cluster) as target:
+        for namespace in move.namespaces:
+            _check_namespace(source, target, namespace)
+        objects = _source_objects(source, adapter, move.namespaces)
+        custom, unchecked = _custom_objects(source, adapter, move.namespaces)
+
+    claims = [_describe(item) for resource_type, item in objects if resource_type["kind"] == "PersistentVolumeClaim"]
+    if claims:
+        raise MoveError(
+            f"Manifests-only moves copy no volume data, and these namespaces have PersistentVolumeClaims: "
+            f"{_some(claims)}. Move them with Velero instead."
+        )
+    if custom:
+        raise MoveError(
+            f"Manifests-only moves copy built-in kinds only, and these namespaces have custom resources: "
+            f"{_some(custom)}. Move them with Velero instead, or delete those first."
+        )
+    if unchecked:
+        _log(move, f"Cannot tell whether the namespaces have custom resources of {_some(unchecked)}: CloudHop "
+                   f"may not list them. Those would not be copied.", level=MoveEvent.Level.WARNING)
+    _log(move, f"Checked: {len(objects)} object{'s' if len(objects) != 1 else ''} to copy, no volumes")
+    return DONE
+
+
+def _copy(move: Move) -> str:
+    """Read the namespaces' objects from the source and apply them to the target, in order.
+
+    Applying is idempotent, so a retry applies everything again.
+    """
+    adapter = KubeAccessAdapter.for_account(move.source_cluster.account_id)
+    with _kube(move.source_cluster) as source:
+        objects = _source_objects(source, adapter, move.namespaces)
+
+    applied, skipped, failed = {}, [], []
+    with _kube(move.target_cluster) as target:
+        for resource_type, item in sorted(objects, key=lambda pair: _apply_order(pair[0]["kind"])):
+            if _finished(resource_type["kind"], item):
+                # A Job or Pod that already ran would run again
+                skipped.append(_describe(item, resource_type["kind"]))
+                continue
+            try:
+                target.apply(_object_path(resource_type, item), _for_target(resource_type, item), FIELD_MANAGER)
+            except KubeAPIError as exc:
+                failed.append(f"{_describe(item, resource_type['kind'])}: {exc}")
+                continue
+            applied[resource_type["kind"]] = applied.get(resource_type["kind"], 0) + 1
+
+    if skipped:
+        _log(move, f"Not copied, since they already finished: {_some(skipped)}", level=MoveEvent.Level.WARNING)
+    if failed:
+        raise MoveError(f"Could not apply {len(failed)} object{'s' if len(failed) != 1 else ''} in the target: "
+                        f"{_some(failed, 3)}")
+    total = sum(applied.values())
+    kinds = ", ".join(f"{count} {kind}" for kind, count in sorted(applied.items()))
+    _log(move, f"Applied {total} object{'s' if total != 1 else ''} in the target: {kinds}")
     return DONE
 
 
@@ -428,6 +516,7 @@ STEPS = {
     Status.SCALING_DOWN: _scale_down,
     Status.BACKING_UP: _back_up,
     Status.RESTORING: _restore,
+    Status.COPYING: _copy,
     Status.SCALING_UP: _scale_up,
     Status.VERIFYING: _verify,
 }
@@ -469,6 +558,143 @@ def _create(kube: KubeClient, path: str, body: dict) -> None:
     except KubeAPIError as exc:
         if exc.status_code != 409:
             raise
+
+
+def _check_namespace(source: KubeClient, target: KubeClient, namespace: str) -> None:
+    if not _exists(source, f"/api/v1/namespaces/{namespace}"):
+        raise MoveError(f"Namespace {namespace} does not exist in the source cluster.")
+    if _exists(target, f"/api/v1/namespaces/{namespace}"):
+        raise MoveError(
+            f"Namespace {namespace} already exists in the target cluster. A move leaves objects that already exist "
+            f"there alone, so delete it there first, or leave it out of the move."
+        )
+
+
+def _source_objects(kube: KubeClient, adapter: KubeAccessAdapter, namespaces: list[str]) -> list[tuple[dict, dict]]:
+    """The namespaces and the user-created objects of every built-in kind in them, as (resource type, object).
+
+    Raises MoveError when a kind cannot be read, since the move would leave its objects behind.
+    """
+    resource_types = [
+        resource_type for resource_type in list_native_resource_types(kube, adapter.skipped_resources)
+        if resource_type["namespaced"]
+    ]
+    objects = []
+    for namespace in namespaces:
+        objects.append((NAMESPACE_TYPE, kube.get(f"/api/v1/namespaces/{namespace}")))
+        for resource_type in resource_types:
+            try:
+                items = kube.list(_list_path(resource_type, namespace))
+            except KubeAPIError as exc:
+                if exc.status_code == 404:  # the kind went away since discovery
+                    continue
+                if exc.status_code in (401, 403):
+                    raise MoveError(
+                        f"CloudHop cannot read {resource_type['kind']} objects in the source, so it cannot copy "
+                        f"them: {exc}. See the Guide, under Moves."
+                    )
+                raise
+            objects.extend(
+                (resource_type, item) for item in items
+                if adapter.is_user_created(resource_type["group"], resource_type["kind"], item)
+            )
+    return objects
+
+
+def _custom_objects(kube: KubeClient, adapter: KubeAccessAdapter, namespaces: list[str]) -> tuple[list[str], list[str]]:
+    """User-created custom resources in the namespaces, and the custom kinds CloudHop may not list."""
+    found, unchecked = [], []
+    for resource_type in list_custom_resource_types(kube):
+        if not resource_type["namespaced"]:
+            continue
+        for namespace in namespaces:
+            try:
+                items = kube.list(_list_path(resource_type, namespace))
+            except KubeAPIError as exc:
+                if exc.status_code in (401, 403):
+                    unchecked.append(f"{resource_type['kind']}.{resource_type['group']}")
+                    break
+                if exc.status_code in (404, 405):
+                    break
+                raise
+            found.extend(
+                _describe(item, resource_type["kind"]) for item in items
+                if adapter.is_user_created(resource_type["group"], resource_type["kind"], item)
+            )
+    return found, unchecked
+
+
+def _for_target(resource_type: dict, item: dict) -> dict:
+    """The object as applied to the target: without what the source cluster set on it."""
+    manifest = clean_manifest(resource_type, item)
+    metadata, spec, kind = manifest["metadata"], manifest.get("spec"), resource_type["kind"]
+    metadata.pop("finalizers", None)
+    annotations = {k: v for k, v in (metadata.get("annotations") or {}).items() if k not in CLUSTER_ANNOTATIONS}
+    if annotations:
+        metadata["annotations"] = annotations
+    else:
+        metadata.pop("annotations", None)
+
+    if kind == "Namespace":
+        # Only the "kubernetes" finalizer, which the target adds itself
+        manifest.pop("spec", None)
+    elif kind == "Service" and spec:
+        # Allocated from the source cluster's ranges
+        for key in ("clusterIP", "clusterIPs", "healthCheckNodePort"):
+            spec.pop(key, None)
+        for port in spec.get("ports") or []:
+            port.pop("nodePort", None)
+    elif kind == "Pod" and spec:
+        spec.pop("nodeName", None)
+    elif kind == "Job" and spec:
+        # Generated from the Job's uid; the target generates its own
+        spec.pop("selector", None)
+        labels = (spec.get("template", {}).get("metadata") or {}).get("labels") or {}
+        for key in JOB_LABELS:
+            labels.pop(key, None)
+    elif kind == "Secret" and manifest.get("type") == "kubernetes.io/service-account-token":
+        # Signed by the source cluster; the target's token controller fills it in
+        manifest.pop("data", None)
+    return manifest
+
+
+def _finished(kind: str, item: dict) -> bool:
+    status = item.get("status") or {}
+    if kind == "Job":
+        return any(
+            condition.get("type") in ("Complete", "Failed") and condition.get("status") == "True"
+            for condition in status.get("conditions") or []
+        )
+    return kind == "Pod" and status.get("phase") in ("Succeeded", "Failed")
+
+
+def _apply_order(kind: str) -> int:
+    if kind in APPLY_FIRST:
+        return APPLY_FIRST.index(kind)
+    if kind in APPLY_LAST:
+        return len(APPLY_FIRST) + 1 + APPLY_LAST.index(kind)
+    return len(APPLY_FIRST)
+
+
+def _list_path(resource_type: dict, namespace: str) -> str:
+    return f"{resource_type['base']}/namespaces/{namespace}/{resource_type['resource']}"
+
+
+def _object_path(resource_type: dict, item: dict) -> str:
+    metadata = item["metadata"]
+    if resource_type["kind"] == "Namespace":
+        return f"/api/v1/namespaces/{metadata['name']}"
+    return f"{_list_path(resource_type, metadata['namespace'])}/{metadata['name']}"
+
+
+def _describe(item: dict, kind: str | None = None) -> str:
+    metadata = item.get("metadata", {})
+    name = f"{metadata['namespace']}/{metadata['name']}" if metadata.get("namespace") else metadata.get("name", "?")
+    return f"{kind} {name}" if kind else name
+
+
+def _some(names: list[str], limit: int = 5) -> str:
+    return ", ".join(names[:limit]) + (f" and {len(names) - limit} more" if len(names) > limit else "")
 
 
 def _storage_location(kube: KubeClient, side: str, name: str) -> dict:

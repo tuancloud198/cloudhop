@@ -6,6 +6,7 @@ export const STEP_LABELS = {
   scaling_down: 'Scaling down the source',
   backing_up: 'Backing up',
   restoring: 'Restoring',
+  copying: 'Copying manifests',
   scaling_up: 'Scaling up the target',
   verifying: 'Verifying',
   done: 'Done',
@@ -14,6 +15,8 @@ export const STEP_LABELS = {
 }
 
 export const FINISHED = ['done', 'failed', 'cancelled']
+
+export const METHOD_LABELS = { velero: 'Velero', manifests: 'Manifests only' }
 
 export function statusTone(status) {
   if (status === 'done') return 'success'

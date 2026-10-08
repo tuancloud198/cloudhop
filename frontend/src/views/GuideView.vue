@@ -146,6 +146,69 @@ const applySecretReader = computed(() => `gcloud container clusters get-credenti
 
 kubectl apply -f cloudhop-secret-reader.yaml`)
 
+// Manifests-only moves: the target creates the namespaces and applies every object in them
+const manifestTargetRole = computed(() => `# Target cluster: create the moved namespaces and apply their objects
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudhop-manifest-mover
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudhop-manifest-mover
+subjects:
+  - kind: User
+    name: "${uniqueId.value}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cloudhop-manifest-mover
+  apiGroup: rbac.authorization.k8s.io
+---
+# Kubernetes' built-in "admin" role: create and update the objects inside namespaces
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudhop-manifest-admin
+subjects:
+  - kind: User
+    name: "${uniqueId.value}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: admin
+  apiGroup: rbac.authorization.k8s.io
+`)
+
+const manifestSourceRole = computed(() => `# Source cluster, cutover only: scale the workloads to 0 once the target runs them
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cloudhop-scaler
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cloudhop-scaler
+subjects:
+  - kind: User
+    name: "${uniqueId.value}"
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cloudhop-scaler
+  apiGroup: rbac.authorization.k8s.io
+`)
+
 // Moves: TARGET_PROJECT is left for the user, since fill() only knows the selected account
 const moveBucket = `# In the target account's project: the bucket, and the account Velero uses for it
 gcloud storage buckets create gs://BUCKET \\
@@ -624,7 +687,54 @@ watch(() => route.hash, scrollToHash)
             Moving namespaces
           </h3>
           <p>
-            A move copies namespaces, with every object and the data of their volumes, to a cluster in another account.
+            A move copies namespaces to a cluster in another account, in one of two ways:
+          </p>
+          <ul>
+            <li>
+              <strong>Manifests only:</strong> CloudHop reads the namespaces' objects from the source and applies them
+              to the target. Nothing to install; no volume data and no custom resources.
+            </li>
+            <li>
+              <strong>Velero:</strong> every object and the data of their volumes, through a Cloud Storage bucket.
+            </li>
+          </ul>
+          <p>
+            Either way, <strong>cutover</strong> scales the source's workloads to 0 and <strong>keep running</strong>
+            leaves them alone. The source is never deleted.
+          </p>
+
+          <h3>Manifests only</h3>
+          <p>
+            CloudHop already reads every object in the source, Secrets included, with the access set up above. It
+            copies objects of built-in kinds (Deployments, Services, ConfigMaps, Secrets, Ingresses, RBAC, ...), drops
+            what the source cluster set on them (cluster IPs, node ports, finalizers), and server-side-applies them in
+            order: the namespace, then accounts, Secrets and ConfigMaps, then Services, then workloads. Jobs and Pods
+            that already finished are not copied. Namespaces with PersistentVolumeClaims or custom resources are
+            refused; move those with Velero.
+          </p>
+          <ol class="steps">
+            <li>
+              <strong>Allow CloudHop to write in the target cluster.</strong> Bind it to the unique ID of the
+              <strong>target</strong> cluster's account: pick that account at the top of this page before copying.
+              <CodeBlock :code="manifestTargetRole" label="cloudhop-manifest-mover.yaml" />
+              <p class="muted small">
+                The built-in <code>admin</code> role cannot write ResourceQuotas or LimitRanges, nor bind roles with
+                more than it has; a namespace with those needs <code>cluster-admin</code> instead.
+              </p>
+            </li>
+            <li>
+              <strong>For a cutover, allow CloudHop to scale workloads in the source cluster,</strong> bound to the
+              <strong>source</strong> cluster's account.
+              <CodeBlock :code="manifestSourceRole" label="cloudhop-scaler.yaml" />
+            </li>
+            <li>
+              <strong>Start a move</strong> from <strong>Moves</strong> with <strong>Manifests only</strong>. CloudHop
+              checks first that every object can be read and nothing it cannot copy is there.
+            </li>
+          </ol>
+
+          <h3>With Velero</h3>
+          <p>
             <a href="https://velero.io" target="_blank" rel="noopener">Velero</a> does the copy: in the source cluster
             it backs the namespaces up into a Cloud Storage bucket, and in the target it restores them. CloudHop starts
             each step, scales the workloads down and up for a cutover, and checks the result.
@@ -670,8 +780,9 @@ watch(() => route.hash, scrollToHash)
           <h3>What to know</h3>
           <ul>
             <li>
-              <strong>Cutover</strong> stops the source workloads before the last backup, so the data is consistent;
-              the app is down until the target is ready. The source is left scaled to 0, not deleted.
+              <strong>Cutover</strong> with Velero stops the source workloads before the backup, so the data is
+              consistent; the app is down until the target is ready. With manifests only, the source is scaled down
+              after the target is ready, with no downtime. Either way the source is left scaled to 0, not deleted.
             </li>
             <li>
               <strong>New external IPs.</strong> LoadBalancer Services and Ingresses get new addresses in the target;
