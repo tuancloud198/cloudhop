@@ -4,8 +4,7 @@ from accounts.models import Account
 from clusters.models import Clusters
 from common.cloud.gcp import GCPClient
 from common.kube import KubeClient
-
-from .base import KubeAccessAdapter
+from kubernetes.adapters.base import KubeAccessAdapter
 
 # {{project_id}} is left for GCPClient to fill
 CLUSTER_URL = (

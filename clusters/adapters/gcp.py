@@ -1,10 +1,9 @@
 import logging
 
 from accounts.models import Account
+from clusters.adapters.base import ClusterAdapter
 from common.cloud import CloudAPIError
 from common.cloud.gcp import GCPClient
-
-from .base import ClusterAdapter
 
 logger = logging.getLogger(__name__)
 

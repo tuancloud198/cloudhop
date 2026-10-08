@@ -1,17 +1,17 @@
 import base64
 import json
 import logging
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from urllib.parse import quote
 
 from django.utils.dateparse import parse_datetime
 
 from accounts.models import Account
+from billing.adapters.base import BillingAdapter
+from billing.models import Budget
+from common.cloud import CloudTimeout
 from common.cloud.gcp import GCPClient
-
-from ..models import Budget
-from .base import BillingAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,8 @@ CALENDAR_PERIODS = {
 }
 # Budget filters that narrow it below whole projects
 OTHER_FILTERS = ("resourceAncestors", "services", "subaccounts", "labels")
+# Seconds a pull waits for messages; Pub/Sub holds an empty pull open until messages arrive
+PULL_WAIT = 5
 
 
 class GCPBillingAdapter(BillingAdapter):
@@ -72,11 +74,16 @@ class GCPBillingAdapter(BillingAdapter):
 
     def pull_budget_updates(self, subscription: str) -> tuple[list[dict], list[str]]:
         """Needs pubsub.subscriptions.consume on the subscription, e.g. Pub/Sub Subscriber."""
-        data = self.client.post(
-            PUBSUB_URL.format(subscription=subscription, action="pull"),
-            # CloudHop pulls on demand, so do not hold the request open waiting for messages
-            {"maxMessages": 100, "returnImmediately": True},
-        )
+        try:
+            data = self.client.post(
+                PUBSUB_URL.format(subscription=subscription, action="pull"),
+                # Not returnImmediately: with it Pub/Sub often answers empty while messages are waiting
+                {"maxMessages": 100},
+                timeout=PULL_WAIT,
+            )
+        except CloudTimeout:
+            # Nothing arrived while waiting; messages the dropped pull may have taken come back after their ack deadline
+            return [], []
         updates, ack_ids = [], []
         for received in data.get("receivedMessages", []):
             ack_ids.append(received["ackId"])
@@ -86,6 +93,17 @@ class GCPBillingAdapter(BillingAdapter):
                 # Acknowledged anyway, or it would come back on every pull
                 logger.warning("Ignoring malformed budget notification %s: %s", received["message"].get("messageId"), exc)
         return updates, ack_ids
+
+    def replay_budget_updates(self, subscription: str, since: datetime) -> None:
+        """Needs pubsub.subscriptions.consume on the subscription, e.g. Pub/Sub Subscriber.
+
+        Seeking back finds only the messages Pub/Sub kept: those still within the topic's
+        message retention, or the subscription's when it retains acknowledged messages.
+        """
+        self.client.post(
+            PUBSUB_URL.format(subscription=subscription, action="seek"),
+            {"time": since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")},
+        )
 
     def acknowledge(self, subscription: str, ack_ids: list[str]) -> None:
         self.client.post(PUBSUB_URL.format(subscription=subscription, action="acknowledge"), {"ackIds": ack_ids})

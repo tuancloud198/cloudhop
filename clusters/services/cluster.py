@@ -2,9 +2,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import Account
-
-from ..adapters import ClusterAdapter
-from ..models import Clusters
+from clusters.adapters import ClusterAdapter
+from clusters.models import Clusters
 
 __all__ = ["AccountNotUsable", "sync_clusters"]
 

@@ -29,6 +29,9 @@ db.sqlite3-journal
 /staticfiles/
 /media/
 
+# Celery beat's record of when each schedule last ran
+celerybeat-schedule*
+
 # Editors and OS
 .idea/
 .vscode/

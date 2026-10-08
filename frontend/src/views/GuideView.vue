@@ -76,10 +76,16 @@ const createKey = `gcloud iam service-accounts keys create cloudhop-key.json \\
 const findBillingAccount = `gcloud billing projects describe PROJECT_ID \\
   --format 'value(billingAccountName)'`
 
-const createSubscription = `gcloud pubsub topics create cloudhop-budget --project PROJECT_ID
+const createSubscription = `gcloud pubsub topics create cloudhop-budget \\
+  --message-retention-duration 31d \\
+  --project PROJECT_ID
 
 gcloud pubsub subscriptions create cloudhop-budget \\
   --topic cloudhop-budget \\
+  --project PROJECT_ID`
+
+const retainTopic = `gcloud pubsub topics update cloudhop-budget \\
+  --message-retention-duration 31d \\
   --project PROJECT_ID`
 
 const createBudget = `gcloud billing budgets create \\
@@ -405,9 +411,13 @@ watch(() => route.hash, scrollToHash)
               <CodeBlock :code="fill(findBillingAccount)" label="shell" />
             </li>
             <li>
-              <strong>Create a topic and a pull subscription</strong> for the budget's updates. Create the subscription
-              first: a topic keeps no messages, so updates sent before the subscription exists are lost.
+              <strong>Create a topic and a pull subscription</strong> for the budget's updates. The topic keeps them for
+              31 days, so on its first sync CloudHop reads them all again, even ones another CloudHop already took.
               <CodeBlock :code="fill(createSubscription)" label="shell" />
+              <p class="muted small">
+                Topic made without retention? Updates from before this are gone, but it keeps the ones from now on:
+              </p>
+              <CodeBlock :code="fill(retainTopic)" label="shell" />
             </li>
             <li>
               <strong>Create the budget</strong> in the Console, under <em>Billing → Budgets &amp; alerts → Create

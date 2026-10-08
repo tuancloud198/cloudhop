@@ -10,7 +10,10 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
+
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,12 +23,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-gi@^cjm0^_1w38xwc(j7sphroo2gc1q%9m+5s_k^*ow$2bbui-'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-gi@^cjm0^_1w38xwc(j7sphroo2gc1q%9m+5s_k^*ow$2bbui-')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+# Comma-separated; with DEBUG and none set, Django allows localhost
+ALLOWED_HOSTS = [host for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if host]
 
 # The Vue dev server (frontend/) proxies /api here; its origin must pass the CSRF check
 CSRF_TRUSTED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -50,6 +54,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves the admin's and DRF's static files when gunicorn runs the app
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -87,10 +93,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Where uploaded cloud credential files are stored (kept out of git)
 CREDENTIALS_DIR = BASE_DIR / "credentials"
 
+# The defaults match the postgres service in compose.yaml, published on localhost
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'cloudhop'),
+        'USER': os.environ.get('POSTGRES_USER', 'cloudhop'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cloudhop'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 
@@ -130,6 +141,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+# collectstatic copies them here, for whitenoise
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # Email
@@ -138,5 +151,30 @@ STATIC_URL = 'static/'
 MAILERS = {
     'default': {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
+    },
+}
+
+
+# Celery: syncs clusters, resources and billing in the background (run a worker with --beat)
+
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
+# Nothing reads task results; failures are logged by the worker
+CELERY_TASK_IGNORE_RESULT = True
+CELERY_TIMEZONE = TIME_ZONE
+
+# Minutes between scheduled syncs; a queued sync not started by the next run is dropped
+SYNC_INTERVAL_MINUTES = 15
+CELERY_BEAT_SCHEDULE = {
+    "sync-clusters": {
+        "task": "clusters.tasks.sync_all_clusters",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
+    },
+    "sync-resources": {
+        "task": "kubernetes.tasks.sync_all_resources",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
+    },
+    "sync-billing": {
+        "task": "billing.tasks.sync_all_billing",
+        "schedule": crontab(minute=f"*/{SYNC_INTERVAL_MINUTES}"),
     },
 }

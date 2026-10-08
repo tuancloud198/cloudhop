@@ -24,7 +24,8 @@ Rules:
 
 - Name each module after the resource it holds (`account.py`, `cluster.py`, ...).
 - Re-export every public name in the package `__init__.py` and list it in `__all__`. Other code imports from the package (`from accounts.models import Account`), never from the submodule.
-- Inside a package module, import sibling packages with two dots (`from ..models import Account`).
+- Use absolute imports that name the app (`from accounts.models import Account`), never relative ones (`from ..models import Account`). The only exception is the re-exports in a package's `__init__.py` (`from .account import Account`).
+- To import another module of the same package, name the module (`from billing.adapters.base import BillingAdapter`). Importing the package itself would be circular, since its `__init__.py` imports that module.
 - Every model must be re-exported from `models/__init__.py`, otherwise Django will not detect it for migrations.
 - After adding or moving a model, run `python manage.py makemigrations --check --dry-run` to confirm Django still sees it.
 
@@ -56,4 +57,4 @@ Vue 3 + Vite + vue-router, plain CSS, no UI library. Colors are tokens in `src/s
 - `src/api.js` is the only place that calls the backend (`/api/v1/...`). Add a method there for each new endpoint; it sends the CSRF token and turns DRF errors into `ApiError` (`message`, `status`, `fields`).
 - `src/views/` holds one component per route (`router.js`); `src/components/` holds reusable pieces.
 - Shared state is a plain `reactive` object (`src/accounts.js`); notifications go through `notify()` in `src/toasts.js`.
-- In development, run Django on :8000 and `npm run dev` in `frontend/`; Vite proxies `/api` to Django (`CLOUDHOP_API` overrides the target). `CSRF_TRUSTED_ORIGINS` in settings allows the Vite origin.
+- In development, start PostgreSQL and Redis with `docker compose up -d postgres redis`, then run Django on :8000 and `npm run dev` in `frontend/`; Vite proxies `/api` to Django (`CLOUDHOP_API` overrides the target). `CSRF_TRUSTED_ORIGINS` in settings allows the Vite origin.

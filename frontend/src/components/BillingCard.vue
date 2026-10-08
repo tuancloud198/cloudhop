@@ -20,6 +20,7 @@ const billing = ref(null)
 const loading = ref(false)
 const loadError = ref(null)
 const syncing = ref(false)
+const replaying = ref(false)
 // What the last refresh could not read; not stored, so only shown after a refresh in this page
 const warnings = ref([])
 const subscription = ref('')
@@ -59,18 +60,22 @@ function show(data) {
   subscription.value = data.billing_account?.pubsub_subscription ?? ''
 }
 
-async function refresh() {
+// replay: first ask the provider again for every notification it still keeps
+async function refresh({ replay = false } = {}) {
   syncing.value = true
+  replaying.value = replay
   try {
-    const result = await api.syncBilling(props.account.id)
+    const result = await api.syncBilling(props.account.id, { replay })
     show(result)
     warnings.value = result.warnings
     const received = result.received ? `, ${result.received} spend update${result.received === 1 ? '' : 's'} received` : ''
-    notify(`Billing refreshed${received}`, result.warnings.length ? 'info' : 'success')
+    const done = replay ? 'Notifications replayed' : 'Billing refreshed'
+    notify(`${done}${received || (replay ? ', none new' : '')}`, result.warnings.length ? 'info' : 'success')
   } catch (error) {
-    notify(`Billing refresh failed: ${error.message}`, 'error')
+    notify(`${replay ? 'Replay' : 'Billing refresh'} failed: ${error.message}`, 'error')
   } finally {
     syncing.value = false
+    replaying.value = false
   }
 }
 
@@ -126,10 +131,10 @@ function period(budget) {
           Refreshed {{ timeAgo(billing.synced_at) }}
         </span>
       </div>
-      <button class="btn btn-sm" :disabled="syncing || loading || !account.is_valid" @click="refresh">
-        <span v-if="syncing" class="spinner" />
+      <button class="btn btn-sm" :disabled="syncing || loading || !account.is_valid" @click="refresh()">
+        <span v-if="syncing && !replaying" class="spinner" />
         <AppIcon v-else name="refresh" :size="14" />
-        {{ syncing ? 'Refreshing…' : 'Refresh billing' }}
+        {{ syncing && !replaying ? 'Refreshing…' : 'Refresh billing' }}
       </button>
     </div>
 
@@ -232,10 +237,22 @@ function period(budget) {
             spellcheck="false"
           />
           <button class="btn" type="submit" :disabled="!subscriptionChanged || savingSubscription">Save</button>
+          <button
+            class="btn"
+            type="button"
+            :disabled="!billingAccount.pubsub_subscription || subscriptionChanged || syncing || !account.is_valid"
+            title="Pull again every notification Pub/Sub still keeps, including ones already read"
+            @click="refresh({ replay: true })"
+          >
+            <span v-if="replaying" class="spinner" />
+            {{ replaying ? 'Replaying…' : 'Replay' }}
+          </button>
         </div>
         <span class="muted small">
           Spend comes only from these notifications; <strong>Refresh billing</strong> pulls the pending ones. Shared by
-          every account on this billing account.
+          every account on this billing account. <strong>Replay</strong> pulls again the ones Pub/Sub still keeps, up to
+          31 days back, once the topic has message retention.
+          <RouterLink :to="{ name: 'guide', hash: '#gcp-billing' }">How to turn it on</RouterLink>
         </span>
       </form>
     </div>

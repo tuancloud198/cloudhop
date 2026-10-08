@@ -1,28 +1,35 @@
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
 
 from accounts.models import Account
+from billing.adapters import BillingAdapter
+from billing.models import AccountBilling, BillingAccount, Budget, BudgetStatus
 from common.cloud import CloudAPIError
-
-from ..adapters import BillingAdapter
-from ..models import AccountBilling, BillingAccount, Budget, BudgetStatus
 
 __all__ = ["AccountNotUsable", "budget_covers", "spend_status", "sync_billing"]
 
 # Pulls per sync, each returning up to 100 notifications
 MAX_PULLS = 20
 CENT = Decimal("0.01")
+# How far back a cold start asks for notifications again; the longest a Pub/Sub topic can keep them
+REPLAY_PERIOD = timedelta(days=31)
 
 
 class AccountNotUsable(Exception):
     """The account is inactive or its credential was never validated."""
 
 
-def sync_billing(account_id: int) -> dict:
+def sync_billing(account_id: int, replay: bool = False) -> dict:
     """Find the billing account paying for the account, read its budgets, and store the
     budget notifications waiting in its Pub/Sub subscription.
+
+    With replay, or on a cold start (none of the billing account's notifications stored
+    yet), the subscription is first replayed from REPLAY_PERIOD ago, so notifications
+    already acknowledged (e.g. by another CloudHop) come back if the provider still
+    keeps them. Those already stored are not stored again.
 
     Only finding the billing account is required. Its details, its budgets and the
     notifications each need more access; when one cannot be read, the reason is added
@@ -60,6 +67,12 @@ def sync_billing(account_id: int) -> dict:
             _store_budgets(billing_account, budgets)
 
         if billing_account.pubsub_subscription:
+            if replay or not BudgetStatus.objects.filter(budget__billing_account=billing_account).exists():
+                try:
+                    adapter.replay_budget_updates(billing_account.pubsub_subscription, timezone.now() - REPLAY_PERIOD)
+                except CloudAPIError as exc:
+                    # Pulling still gets what is waiting
+                    warnings.append(f"Cannot replay earlier budget notifications: {exc}")
             try:
                 received = _pull_updates(adapter, account.provider, billing_account.pubsub_subscription)
             except CloudAPIError as exc:

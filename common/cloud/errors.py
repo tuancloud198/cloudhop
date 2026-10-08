@@ -2,6 +2,10 @@ class CloudAPIError(Exception):
     """A call to the cloud provider failed; the message says why and is safe to show to the user."""
 
 
+class CloudTimeout(CloudAPIError):
+    """The provider did not answer in time."""
+
+
 class InvalidCredential(CloudAPIError):
     """The credential cannot be used; the message says why and is safe to show to the user."""
 

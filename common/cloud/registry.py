@@ -1,6 +1,6 @@
 from abc import ABC
 
-from .errors import UnsupportedProvider
+from common.cloud.errors import UnsupportedProvider
 
 
 class ProviderAdapter(ABC):

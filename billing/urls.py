@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import AccountBillingSyncView, AccountBillingView, BillingAccountDetailView
+from billing.views import AccountBillingSyncView, AccountBillingView, BillingAccountDetailView
 
 urlpatterns = [
     path("accounts/<int:account_id>/billing/", AccountBillingView.as_view(), name="account-billing"),

@@ -3,11 +3,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Account
+from billing.models import AccountBilling, BillingAccount
+from billing.serializers import AccountBillingSerializer, BillingAccountSerializer
+from billing.services import AccountNotUsable, sync_billing
 from common.cloud import CloudAPIError, InvalidCredential, UnsupportedProvider
-
-from ..models import AccountBilling, BillingAccount
-from ..serializers import AccountBillingSerializer, BillingAccountSerializer
-from ..services import AccountNotUsable, sync_billing
 
 
 class AccountBillingView(APIView):
@@ -28,12 +27,14 @@ class AccountBillingView(APIView):
 class AccountBillingSyncView(APIView):
     """POST: read the account's billing account and budgets, and pull budget notifications.
 
-    The response adds warnings (what could not be read) and received (notifications stored).
+    {"replay": true} first asks the provider again for the notifications it still keeps,
+    acknowledged ones included. The response adds warnings (what could not be read) and
+    received (notifications stored).
     """
 
     def post(self, request, account_id):
         try:
-            result = sync_billing(account_id)
+            result = sync_billing(account_id, replay=request.data.get('replay') is True)
         except Account.DoesNotExist:
             return Response({'detail': f'account {account_id} not found'}, status=status.HTTP_404_NOT_FOUND)
         except (AccountNotUsable, InvalidCredential, UnsupportedProvider) as exc:

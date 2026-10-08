@@ -16,6 +16,8 @@
   --warning: light-dark(#b45309, #e3a33f);
   --warning-soft: light-dark(#fdf3e2, #362813);
   --code-bg: light-dark(#f6f8fa, #12151a);
+  /* The today line on a spend meter */
+  --meter-marker: light-dark(#ffffff, #e6e8ec);
   --shadow:
     0 1px 2px light-dark(rgb(16 24 40 / 6%), rgb(0 0 0 / 40%)),
     0 1px 3px light-dark(rgb(16 24 40 / 10%), rgb(0 0 0 / 20%));

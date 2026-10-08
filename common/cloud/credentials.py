@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from .errors import InvalidCredential
+from common.cloud.errors import InvalidCredential
 
 
 def load_credential_file(path: str) -> dict:

@@ -3,11 +3,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import Account
+from clusters.models import Clusters
+from clusters.serializers import ClusterSerializer
+from clusters.services import AccountNotUsable, sync_clusters
 from common.cloud import CloudAPIError, InvalidCredential, UnsupportedProvider
-
-from ..models import Clusters
-from ..serializers import ClusterSerializer
-from ..services import AccountNotUsable, sync_clusters
 
 
 class ClusterListView(generics.ListAPIView):

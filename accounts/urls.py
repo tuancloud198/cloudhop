@@ -1,5 +1,6 @@
 from rest_framework.routers import DefaultRouter
-from .views import AccountViewSet
+
+from accounts.views import AccountViewSet
 
 router = DefaultRouter()
 router.register("accounts", AccountViewSet, basename="account")

@@ -1,15 +1,18 @@
 import logging
 
+import requests
 from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import AuthorizedSession, Request
 from google.oauth2 import service_account
 
-from ..errors import CloudAPIError, InvalidCredential
+from common.cloud.errors import CloudAPIError, CloudTimeout, InvalidCredential
 
 logger = logging.getLogger(__name__)
 
 # GKE rejects the read-only scope; actual access is limited by the service account's IAM roles
 SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
+# Seconds to wait for GCP to answer
+TIMEOUT = 10
 
 
 class GCPClient:
@@ -35,24 +38,33 @@ class GCPClient:
     def get(self, url: str, error_cls: type[CloudAPIError] = CloudAPIError) -> dict:
         """GET a URL (formatted with project_id) and return the JSON body.
 
-        Raises InvalidCredential if authentication fails, error_cls for any other failure.
+        Raises InvalidCredential if authentication fails, CloudTimeout if GCP does not
+        answer in time, error_cls for any other failure.
         """
-        return self._request("GET", url, None, error_cls)
+        return self._request("GET", url, None, error_cls, TIMEOUT)
 
-    def post(self, url: str, body: dict, error_cls: type[CloudAPIError] = CloudAPIError) -> dict:
+    def post(
+        self, url: str, body: dict, error_cls: type[CloudAPIError] = CloudAPIError, timeout: float = TIMEOUT
+    ) -> dict:
         """POST a JSON body to a URL (formatted with project_id) and return the JSON body.
 
-        Raises InvalidCredential if authentication fails, error_cls for any other failure.
+        Raises InvalidCredential if authentication fails, CloudTimeout if GCP does not
+        answer within timeout seconds, error_cls for any other failure.
         """
-        return self._request("POST", url, body, error_cls)
+        return self._request("POST", url, body, error_cls, timeout)
 
-    def _request(self, method: str, url: str, body: dict | None, error_cls: type[CloudAPIError]) -> dict:
+    def _request(
+        self, method: str, url: str, body: dict | None, error_cls: type[CloudAPIError], timeout: float
+    ) -> dict:
         try:
             session = AuthorizedSession(self._credentials())
-            response = session.request(method, url.format(project_id=self.project_id), json=body, timeout=10)
+            response = session.request(method, url.format(project_id=self.project_id), json=body, timeout=timeout)
         except (GoogleAuthError, ValueError) as exc:
             logger.warning("GCP auth failed for project %s: %s", self.project_id, exc)
             raise InvalidCredential(f"GCP authentication failed: {exc}")
+        except requests.ReadTimeout:
+            # Connected but no answer in time; before OSError, which it subclasses
+            raise CloudTimeout(f"GCP did not answer within {timeout:g}s, try again later")
         except OSError as exc:
             logger.warning("Cannot reach GCP for project %s: %s", self.project_id, exc)
             raise error_cls("cannot reach GCP, try again later")
