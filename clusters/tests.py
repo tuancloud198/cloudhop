@@ -2,9 +2,9 @@ from unittest import mock
 
 from django.test import TestCase
 
-from accounts.models import Account
+from accounts.models.account import Account
 from clusters.tasks import sync_account_clusters, sync_all_clusters
-from common.cloud import CloudAPIError
+from common.cloud.errors import CloudAPIError
 
 
 def account(name, **fields):

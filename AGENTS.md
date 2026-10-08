@@ -2,31 +2,31 @@
 
 ## App layout
 
-Inside each Django app, `models`, `views`, `services` and `serializers` are packages (folders), not single `.py` files. Put each resource in its own module, and have the package's `__init__.py` re-export the public names.
+Inside each Django app, `models`, `views`, `services` and `serializers` are packages (folders), not single `.py` files. Put each resource in its own module and import names directly from that module. Do not re-export names or declare `__all__`.
 
 ```
 <app>/
 ├── models/
-│   ├── __init__.py      # from .account import Account
+│   ├── __init__.py      # empty
 │   └── account.py
 ├── views/
-│   ├── __init__.py      # from .account import AccountViewSet
+│   ├── __init__.py      # empty
 │   └── account.py
 ├── services/
-│   ├── __init__.py      # from .account import InvalidCredential, resolve_account
+│   ├── __init__.py      # empty
 │   └── account.py
 └── serializers/
-    ├── __init__.py      # from .account import AccountSerializer
+    ├── __init__.py      # empty
     └── account.py
 ```
 
 Rules:
 
 - Name each module after the resource it holds (`account.py`, `cluster.py`, ...).
-- Re-export every public name in the package `__init__.py` and list it in `__all__`. Other code imports from the package (`from accounts.models import Account`), never from the submodule.
-- Use absolute imports that name the app (`from accounts.models import Account`), never relative ones (`from ..models import Account`). The only exception is the re-exports in a package's `__init__.py` (`from .account import Account`).
-- To import another module of the same package, name the module (`from billing.adapters.base import BillingAdapter`). Importing the package itself would be circular, since its `__init__.py` imports that module.
-- Every model must be re-exported from `models/__init__.py`, otherwise Django will not detect it for migrations.
+- Import public names from their defining module (`from accounts.models.account import Account`), never through package re-exports.
+- Use absolute imports that name the app, never relative imports, including in `__init__.py`.
+- To import another module of the same package, name the module (`from billing.adapters.base import BillingAdapter`).
+- Keep `models/__init__.py` empty and import model classes directly from their defining modules at the places that use them. Do not add model-loading overrides to `AppConfig`.
 - After adding or moving a model, run `python manage.py makemigrations --check --dry-run` to confirm Django still sees it.
 
 `accounts/` is the reference implementation.
@@ -46,7 +46,7 @@ Provider code is split by job:
 - Each app owns the adapters for its own job in `<app>/adapters/`:
   - `base.py` defines the app's adapter base as a direct subclass of `ProviderAdapter` (e.g. `CredentialAdapter`, `ClusterAdapter`). That gives it its own registry.
   - `<provider>.py` defines one concrete adapter per provider. Setting `provider = Account.Provider.X` registers it automatically.
-  - `__init__.py` imports every provider module, otherwise the adapter is never registered.
+  - `__init__.py` loads every provider module with an absolute module import (`import accounts.adapters.gcp`), otherwise the adapter is never registered. Do not re-export adapter classes.
 - Look up an adapter with `<Base>Adapter.for_account(account)`. A provider with no adapter raises `UnsupportedProvider`.
 - Do not add a method for one app's job to another app's adapter. A new job (e.g. listing nodes) gets its own adapter base in the app that needs it.
 
@@ -54,6 +54,7 @@ Provider code is split by job:
 
 Vue 3 + Vite + vue-router, plain CSS, no UI library. Colors are tokens in `src/styles.css`, each written as `light-dark(light, dark)`; never hard-code a color in a component. The theme (system / light / dark) is kept by `src/theme.js`.
 
+- Use absolute `/src/...` paths for local imports, including components, styles and assets. Import directly from the defining module; do not add re-export files.
 - `src/api.js` is the only place that calls the backend (`/api/v1/...`). Add a method there for each new endpoint; it sends the CSRF token and turns DRF errors into `ApiError` (`message`, `status`, `fields`).
 - `src/views/` holds one component per route (`router.js`); `src/components/` holds reusable pieces.
 - Shared state is a plain `reactive` object (`src/accounts.js`); notifications go through `notify()` in `src/toasts.js`.

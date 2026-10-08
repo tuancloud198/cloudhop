@@ -1,7 +1,5 @@
-from accounts.adapters import CredentialAdapter
-from accounts.models import Account
-
-__all__ = ["resolve_account"]
+from accounts.adapters.base import CredentialAdapter
+from accounts.models.account import Account
 
 
 def resolve_account(account: Account) -> Account:

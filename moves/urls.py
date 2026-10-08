@@ -1,6 +1,6 @@
 from django.urls import path
 
-from moves.views import MoveCancelView, MoveDetailView, MoveListView, MoveRetryView
+from moves.views.move import MoveCancelView, MoveDetailView, MoveListView, MoveRetryView
 
 urlpatterns = [
     path("moves/", MoveListView.as_view(), name="move-list"),

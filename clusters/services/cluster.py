@@ -1,11 +1,9 @@
 from django.db import transaction
 from django.utils import timezone
 
-from accounts.models import Account
-from clusters.adapters import ClusterAdapter
-from clusters.models import Clusters
-
-__all__ = ["AccountNotUsable", "sync_clusters"]
+from accounts.models.account import Account
+from clusters.adapters.base import ClusterAdapter
+from clusters.models.cluster import Clusters
 
 
 class AccountNotUsable(Exception):
@@ -18,7 +16,7 @@ def sync_clusters(account_id: int) -> list[Clusters]:
     New clusters are created, known ones are updated, and clusters no longer
     returned by the provider are marked inactive.
 
-    Raises Account.DoesNotExist, AccountNotUsable, or common.cloud.CloudAPIError.
+    Raises Account.DoesNotExist, AccountNotUsable, or common.cloud.errors.CloudAPIError.
     """
     account = Account.objects.get(pk=account_id)
     if not account.is_active or not account.is_valid:

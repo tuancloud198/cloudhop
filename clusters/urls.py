@@ -1,6 +1,6 @@
 from django.urls import path
 
-from clusters.views import ClusterDetailView, ClusterListView, ClusterSyncView
+from clusters.views.cluster import ClusterDetailView, ClusterListView, ClusterSyncView
 
 urlpatterns = [
     path("accounts/<int:account_id>/clusters/", ClusterListView.as_view(), name="cluster-list"),

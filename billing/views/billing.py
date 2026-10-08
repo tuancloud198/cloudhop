@@ -2,11 +2,12 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from accounts.models import Account
-from billing.models import AccountBilling, BillingAccount
-from billing.serializers import AccountBillingSerializer, BillingAccountSerializer
-from billing.services import AccountNotUsable, sync_billing
-from common.cloud import CloudAPIError, InvalidCredential, UnsupportedProvider
+from accounts.models.account import Account
+from billing.models.account_billing import AccountBilling
+from billing.models.billing_account import BillingAccount
+from billing.serializers.billing import AccountBillingSerializer, BillingAccountSerializer
+from billing.services.billing import AccountNotUsable, sync_billing
+from common.cloud.errors import CloudAPIError, InvalidCredential, UnsupportedProvider
 
 
 class AccountBillingView(APIView):

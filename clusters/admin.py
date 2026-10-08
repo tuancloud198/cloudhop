@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from clusters.models import Clusters
+from clusters.models.cluster import Clusters
 
 
 @admin.register(Clusters)

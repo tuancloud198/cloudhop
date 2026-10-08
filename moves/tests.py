@@ -5,11 +5,11 @@ from unittest import mock
 from django.utils import timezone
 from rest_framework.test import APITestCase
 
-from accounts.models import Account
-from clusters.models import Clusters
-from common.kube import KubeAPIError
-from moves.models import Move
-from moves.services import advance, cancel_move, create_move, retry_move
+from accounts.models.account import Account
+from clusters.models.cluster import Clusters
+from common.kube.client import KubeAPIError
+from moves.models.move import Move
+from moves.services.move import advance, cancel_move, create_move, retry_move
 from moves.tasks import advance_move, resume_moves
 
 VELERO = "/apis/velero.io/v1/namespaces/velero"

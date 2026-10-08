@@ -3,9 +3,7 @@ from pathlib import Path
 
 from django.conf import settings
 
-from common.cloud import InvalidCredential
-
-__all__ = ["delete_credential_file", "store_credential_file"]
+from common.cloud.errors import InvalidCredential
 
 # A service account key is about 2 KB
 MAX_CREDENTIAL_SIZE = 64 * 1024

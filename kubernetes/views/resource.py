@@ -3,11 +3,11 @@ from rest_framework.pagination import LimitOffsetPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from clusters.models import Clusters
-from common.cloud import CloudAPIError, InvalidCredential, UnsupportedProvider
-from kubernetes.models import KubeResource
-from kubernetes.serializers import KubeResourceSerializer
-from kubernetes.services import ClusterNotUsable, resource_summary, sync_resources
+from clusters.models.cluster import Clusters
+from common.cloud.errors import CloudAPIError, InvalidCredential, UnsupportedProvider
+from kubernetes.models.resource import KubeResource
+from kubernetes.serializers.resource import KubeResourceSerializer
+from kubernetes.services.resource import ClusterNotUsable, resource_summary, sync_resources
 
 
 class ResourceSyncView(APIView):

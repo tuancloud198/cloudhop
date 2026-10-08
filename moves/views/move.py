@@ -3,10 +3,10 @@ from rest_framework import generics, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from common.cloud import CloudAPIError
-from moves.models import Move
-from moves.serializers import MoveCreateSerializer, MoveDetailSerializer, MoveSerializer
-from moves.services import InvalidMove, cancel_move, create_move, retry_move
+from common.cloud.errors import CloudAPIError
+from moves.models.move import Move
+from moves.serializers.move import MoveCreateSerializer, MoveDetailSerializer, MoveSerializer
+from moves.services.move import InvalidMove, cancel_move, create_move, retry_move
 from moves.tasks import advance_move
 
 

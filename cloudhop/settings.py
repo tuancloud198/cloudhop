@@ -13,8 +13,11 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 import os
 from pathlib import Path
 
+import dj_database_url
+from dotenv import load_dotenv
 from celery.schedules import crontab
 
+load_dotenv()
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -44,6 +47,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_celery_beat',
     'rest_framework',
     'accounts',
     'clusters',
@@ -93,17 +97,11 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Where uploaded cloud credential files are stored (kept out of git)
 CREDENTIALS_DIR = BASE_DIR / "credentials"
 
-# The defaults match the postgres service in compose.yaml, published on localhost
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': os.environ.get('POSTGRES_DB', 'cloudhop'),
-        'USER': os.environ.get('POSTGRES_USER', 'cloudhop'),
-        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cloudhop'),
-        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
-        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
-    }
-}
+# Docker Compose supplies a PostgreSQL URL; local runs default to SQLite.
+DATABASE_URL = os.environ.get("DATABASE_URL",f"sqlite:///{BASE_DIR}/db.sqlite3")
+db_config = dj_database_url.parse(DATABASE_URL)
+db_config["DISABLE_SERVER_SIDE_CURSORS"] = True
+DATABASES = {"default": db_config}
 
 
 # Password validation
@@ -153,15 +151,35 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+# Redis
+REDIS_URL = os.environ.get(
+    "REDIS_URL",
+    "redis://localhost:6379/0",
+)
 
+# CACHE
+CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {
+                "CLIENT_CLASS": "django_redis.client.DefaultClient",
+                "CONNECTION_POOL_KWARGS": {"max_connections": 100},
+            },
+        },
+    }
 
 # Celery: syncs clusters, resources and billing in the background (run a worker with --beat)
-
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0")
-# Nothing reads task results; failures are logged by the worker
-CELERY_TASK_IGNORE_RESULT = True
+CELERY_BROKER_URL = os.environ.get(
+    "CELERY_BROKER_URL",
+    REDIS_URL,
+)
+CELERY_RESULT_BACKEND = os.environ.get(
+    "CELERY_RESULT_BACKEND",
+    REDIS_URL,
+)
 CELERY_TIMEZONE = TIME_ZONE
-
+CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 # Minutes between scheduled syncs; a queued sync not started by the next run is dropped
 SYNC_INTERVAL_MINUTES = 15
 CELERY_BEAT_SCHEDULE = {

@@ -1,9 +1,9 @@
 import base64
 
-from accounts.models import Account
-from clusters.models import Clusters
-from common.cloud.gcp import GCPClient
-from common.kube import KubeClient
+from accounts.models.account import Account
+from clusters.models.cluster import Clusters
+from common.cloud.gcp.client import GCPClient
+from common.kube.client import KubeClient
 from kubernetes.adapters.base import KubeAccessAdapter
 
 # {{project_id}} is left for GCPClient to fill

@@ -1,6 +1,9 @@
 from django.contrib import admin
 
-from billing.models import AccountBilling, BillingAccount, Budget, BudgetStatus
+from billing.models.account_billing import AccountBilling
+from billing.models.billing_account import BillingAccount
+from billing.models.budget import Budget
+from billing.models.budget_status import BudgetStatus
 
 
 @admin.register(BillingAccount)

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from kubernetes.models import KubeResource
+from kubernetes.models.resource import KubeResource
 
 
 @admin.register(KubeResource)

@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from accounts.models import Account
+from accounts.models.account import Account
 
 
 @admin.register(Account)
@@ -18,4 +18,3 @@ class AccountAdmin(admin.ModelAdmin):
         "is_active",
     )
     list_filter = ("id", "name", "provider", "external_id", "credential_ref")
-

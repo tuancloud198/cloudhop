@@ -12,7 +12,7 @@ It runs on your machine only. It reads from the cloud, and changes a cluster onl
   - Objects the cluster or provider makes for itself are left out: system namespaces, objects owned by another object, built-in RBAC, defaults.
   - Fields set by the API server are removed, and `status` is kept apart from the manifest.
   - Secrets keep their values. The UI can decode them.
-- **Billing:** find the billing account paying for each account, read its budgets, and follow spend through the budget notifications the provider sends to Pub/Sub. Several accounts can share one billing account and its credits. `billing.services.spend_status(account)` tells how much of the budget covering an account is used.
+- **Billing:** find the billing account paying for each account, read its budgets, and follow spend through the budget notifications the provider sends to Pub/Sub. Several accounts can share one billing account and its credits. `billing.services.billing.spend_status(account)` tells how much of the budget covering an account is used.
 - **Moves:** copy namespaces, with their objects and volume data, to a cluster in another account when its budget is close to used up. [Velero](https://velero.io) does the copy through a bucket in the target account; CloudHop runs the steps, including a cutover that stops the source first. See [docs/moves.md](docs/moves.md).
 
 Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
@@ -56,7 +56,7 @@ Open http://localhost:8080. This starts:
 
 ### For development
 
-You need Python 3.12 or later, Node.js, and PostgreSQL and Redis. The compose ones work:
+You need Python 3.12 or later, Node.js, and Redis. Django uses SQLite by default; to use PostgreSQL like the Docker deployment, start the compose services:
 
 ```sh
 docker compose up -d postgres redis
@@ -64,6 +64,9 @@ docker compose up -d postgres redis
 # Backend, on :8000
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
+# Optional: use PostgreSQL instead of the default SQLite database.
+# Add DATABASE_URL=postgresql://cloudhop:cloudhop@localhost:5432/cloudhop
+# to the project-root .env file, using your PostgreSQL credentials and port.
 python manage.py migrate
 python manage.py runserver
 
@@ -76,9 +79,11 @@ npm run dev
 celery -A cloudhop worker --beat --concurrency 2 --loglevel info
 ```
 
-Open http://localhost:5173. Vite forwards `/api` to Django; set `CLOUDHOP_API` to point it elsewhere. Django reads the database from `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER` and `POSTGRES_PASSWORD`, and Celery's broker from `CELERY_BROKER_URL`; the defaults match the compose services.
+Open http://localhost:5173. Vite forwards `/api` to Django; set `CLOUDHOP_API` to point it elsewhere. Django loads the project-root `.env` file and reads `DATABASE_URL`; if it is unset, Django uses `db.sqlite3` in the project root. The `POSTGRES_*` variables configure Docker Compose's PostgreSQL service and its database URL, but do not configure Django directly. When switching databases, existing data stays in the original database and is not copied automatically.
 
-Run the tests with `python manage.py test`. They need PostgreSQL too.
+Celery reads `REDIS_URL` for both its broker and result backend, defaulting to `redis://localhost:6379/0`. Set `CELERY_BROKER_URL` or `CELERY_RESULT_BACKEND` to override either separately. Run `python manage.py migrate` before starting Celery Beat to create its scheduling tables.
+
+Run the tests with `python manage.py test`. They use the database backend selected by `DATABASE_URL`, or SQLite by default. To explicitly test with SQLite in memory, run `DATABASE_URL=sqlite:///:memory: python manage.py test`.
 
 ### Background syncs
 

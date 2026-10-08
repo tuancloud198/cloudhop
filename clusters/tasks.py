@@ -3,9 +3,9 @@ import logging
 from celery import shared_task
 from django.conf import settings
 
-from accounts.models import Account
-from clusters.services import AccountNotUsable, sync_clusters
-from common.cloud import CloudAPIError
+from accounts.models.account import Account
+from clusters.services.cluster import AccountNotUsable, sync_clusters
+from common.cloud.errors import CloudAPIError
 
 logger = logging.getLogger(__name__)
 

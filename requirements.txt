@@ -6,3 +6,7 @@ celery[redis]
 psycopg[binary]
 gunicorn
 whitenoise
+python-dotenv
+dj-database-url
+django-celery-beat
+django-redis

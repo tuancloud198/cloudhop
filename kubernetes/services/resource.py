@@ -4,19 +4,12 @@ from django.db import transaction
 from django.db.models import Count, Max
 from django.utils.dateparse import parse_datetime
 
-from accounts.models import Account
-from clusters.models import Clusters
-from common.kube import KubeAPIError, KubeClient
-from kubernetes.adapters import KubeAccessAdapter
-from kubernetes.models import KubeResource
+from accounts.models.account import Account
+from clusters.models.cluster import Clusters
+from common.kube.client import KubeAPIError, KubeClient
+from kubernetes.adapters.base import KubeAccessAdapter
+from kubernetes.models.resource import KubeResource
 
-__all__ = [
-    "AccountNotUsable",
-    "ClusterNotUsable",
-    "list_native_resource_types",
-    "resource_summary",
-    "sync_resources",
-]
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +51,7 @@ def sync_resources(cluster_id: int) -> dict:
     credential cannot list are reported as skipped and end up with no rows.
 
     Returns {"synced": {kind: count}, "skipped": [{group, kind, reason}]}.
-    Raises Clusters.DoesNotExist, ClusterNotUsable, or common.cloud.CloudAPIError.
+    Raises Clusters.DoesNotExist, ClusterNotUsable, or common.cloud.errors.CloudAPIError.
     """
     cluster = Clusters.objects.select_related("account_id").get(pk=cluster_id)
     account = cluster.account_id

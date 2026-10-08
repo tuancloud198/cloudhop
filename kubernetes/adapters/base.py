@@ -1,10 +1,11 @@
 from abc import abstractmethod
 from functools import cached_property
 
-from accounts.models import Account
-from clusters.models import Clusters
-from common.cloud import ProviderAdapter, load_credential_file
-from common.kube import KubeClient
+from accounts.models.account import Account
+from clusters.models.cluster import Clusters
+from common.cloud.credentials import load_credential_file
+from common.cloud.registry import ProviderAdapter
+from common.kube.client import KubeClient
 
 
 class KubeAccessAdapter(ProviderAdapter):

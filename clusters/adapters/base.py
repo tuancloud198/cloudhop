@@ -1,8 +1,9 @@
 from abc import abstractmethod
 from functools import cached_property
 
-from accounts.models import Account
-from common.cloud import ProviderAdapter, load_credential_file
+from accounts.models.account import Account
+from common.cloud.credentials import load_credential_file
+from common.cloud.registry import ProviderAdapter
 
 
 class ClusterAdapter(ProviderAdapter):

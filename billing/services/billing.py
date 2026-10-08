@@ -4,12 +4,13 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
-from accounts.models import Account
-from billing.adapters import BillingAdapter
-from billing.models import AccountBilling, BillingAccount, Budget, BudgetStatus
-from common.cloud import CloudAPIError
-
-__all__ = ["AccountNotUsable", "budget_covers", "spend_status", "sync_billing"]
+from accounts.models.account import Account
+from billing.adapters.base import BillingAdapter
+from billing.models.account_billing import AccountBilling
+from billing.models.billing_account import BillingAccount
+from billing.models.budget import Budget
+from billing.models.budget_status import BudgetStatus
+from common.cloud.errors import CloudAPIError
 
 # Pulls per sync, each returning up to 100 notifications
 MAX_PULLS = 20
@@ -36,7 +37,7 @@ def sync_billing(account_id: int, replay: bool = False) -> dict:
     to warnings and the sync goes on.
 
     Returns {"billing": AccountBilling, "warnings": [str], "received": int}.
-    Raises Account.DoesNotExist, AccountNotUsable, or common.cloud.CloudAPIError.
+    Raises Account.DoesNotExist, AccountNotUsable, or common.cloud.errors.CloudAPIError.
     """
     account = Account.objects.get(pk=account_id)
     if not account.is_active or not account.is_valid:

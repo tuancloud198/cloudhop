@@ -3,8 +3,8 @@ from datetime import timedelta
 from celery import shared_task
 from django.utils import timezone
 
-from moves.models import Move
-from moves.services import ACTIVE, advance
+from moves.models.move import Move
+from moves.services.move import ACTIVE, advance
 
 # A running move is checked every few seconds; one not checked for this long lost its task
 STALE_AFTER = timedelta(minutes=5)

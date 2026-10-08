@@ -1,6 +1,7 @@
 from django.contrib import admin
 
-from moves.models import Move, MoveEvent
+from moves.models.move import Move
+from moves.models.move_event import MoveEvent
 
 
 class MoveEventInline(admin.TabularInline):

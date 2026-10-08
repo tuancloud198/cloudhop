@@ -22,11 +22,8 @@ x-backend: &backend
     DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-django-insecure-compose-only-change-me}
     DJANGO_DEBUG: "false"
     DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
-    POSTGRES_HOST: postgres
-    POSTGRES_DB: ${POSTGRES_DB:-cloudhop}
-    POSTGRES_USER: ${POSTGRES_USER:-cloudhop}
-    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cloudhop}
-    CELERY_BROKER_URL: redis://redis:6379/0
+    DATABASE_URL: "postgresql://${POSTGRES_USER:-cloudhop}:${POSTGRES_PASSWORD:-cloudhop}@postgres:5432/${POSTGRES_DB:-cloudhop}"
+    REDIS_URL: redis://redis:6379/0
   volumes:
     # Uploaded service account keys
     - credentials:/app/credentials

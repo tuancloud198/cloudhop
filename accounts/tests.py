@@ -7,9 +7,9 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import override_settings
 from rest_framework.test import APITestCase
 
-from accounts.adapters import GCPCredentialAdapter
-from accounts.models import Account
-from common.cloud import InvalidCredential
+from accounts.adapters.gcp import GCPCredentialAdapter
+from accounts.models.account import Account
+from common.cloud.errors import InvalidCredential
 
 
 def key_file(client_id="1234", project_id="demo-project", name="key.json"):

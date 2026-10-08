@@ -2,9 +2,9 @@ from unittest import mock
 
 from django.test import TestCase
 
-from accounts.models import Account
-from clusters.models import Clusters
-from common.cloud import CloudAPIError
+from accounts.models.account import Account
+from clusters.models.cluster import Clusters
+from common.cloud.errors import CloudAPIError
 from kubernetes.tasks import sync_all_resources, sync_cluster_resources
 
 

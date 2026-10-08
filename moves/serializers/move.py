@@ -1,8 +1,9 @@
 from rest_framework import serializers
 
-from clusters.models import Clusters
-from moves.models import Move, MoveEvent
-from moves.services import steps_of
+from clusters.models.cluster import Clusters
+from moves.models.move import Move
+from moves.models.move_event import MoveEvent
+from moves.services.move import steps_of
 
 
 class MoveEventSerializer(serializers.ModelSerializer):
