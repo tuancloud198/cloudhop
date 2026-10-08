@@ -186,6 +186,17 @@ class BillingSyncTests(APITestCase):
 
         self.assertEqual(len(FakeGCPClient.seeks), 1)
 
+    def test_replay_on_request(self):
+        BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
+        FakeGCPClient.pulls = [{"receivedMessages": [notification("m1", 10)]}, {}, {"receivedMessages": [notification("m1", 10, ack_id="again")]}, {}]
+        self.sync()
+
+        response = self.client.post(f"/api/v1/accounts/{self.account.pk}/billing/sync/", {"replay": True}, format="json")
+
+        self.assertEqual(len(FakeGCPClient.seeks), 2)
+        # Already stored before the replay
+        self.assertEqual((response.data["received"], BudgetStatus.objects.count()), (0, 1))
+
     def test_failed_replay_is_a_warning_and_still_pulls(self):
         BillingAccount.objects.create(provider="gcp", external_id=BILLING_ID, pubsub_subscription=SUBSCRIPTION)
         FakeGCPClient.seek_response = CloudAPIError("permission denied on GCP project demo-project: pubsub.subscriptions.consume")

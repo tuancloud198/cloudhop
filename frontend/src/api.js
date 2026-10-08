@@ -78,8 +78,10 @@ export const api = {
   syncResources: (clusterId) => request('POST', `/clusters/${clusterId}/resources/sync/`),
 
   getBilling: (accountId) => request('GET', `/accounts/${accountId}/billing/`),
-  // Also returns warnings (what could not be read) and received (notifications stored)
-  syncBilling: (accountId) => request('POST', `/accounts/${accountId}/billing/sync/`),
+  // Also returns warnings (what could not be read) and received (notifications stored);
+  // replay first asks the provider again for the notifications it still keeps
+  syncBilling: (accountId, { replay = false } = {}) =>
+    request('POST', `/accounts/${accountId}/billing/sync/`, { body: { replay } }),
   // data: {pubsub_subscription}
   updateBillingAccount: (id, data) => request('PATCH', `/billing-accounts/${id}/`, { body: data }),
 }

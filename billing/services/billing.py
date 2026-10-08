@@ -22,13 +22,14 @@ class AccountNotUsable(Exception):
     """The account is inactive or its credential was never validated."""
 
 
-def sync_billing(account_id: int) -> dict:
+def sync_billing(account_id: int, replay: bool = False) -> dict:
     """Find the billing account paying for the account, read its budgets, and store the
     budget notifications waiting in its Pub/Sub subscription.
 
-    On a cold start, when none of the billing account's notifications are stored yet,
-    the subscription is first replayed from REPLAY_PERIOD ago, so notifications already
-    acknowledged (e.g. by another CloudHop) come back if the provider still keeps them.
+    With replay, or on a cold start (none of the billing account's notifications stored
+    yet), the subscription is first replayed from REPLAY_PERIOD ago, so notifications
+    already acknowledged (e.g. by another CloudHop) come back if the provider still
+    keeps them. Those already stored are not stored again.
 
     Only finding the billing account is required. Its details, its budgets and the
     notifications each need more access; when one cannot be read, the reason is added
@@ -66,7 +67,7 @@ def sync_billing(account_id: int) -> dict:
             _store_budgets(billing_account, budgets)
 
         if billing_account.pubsub_subscription:
-            if not BudgetStatus.objects.filter(budget__billing_account=billing_account).exists():
+            if replay or not BudgetStatus.objects.filter(budget__billing_account=billing_account).exists():
                 try:
                     adapter.replay_budget_updates(billing_account.pubsub_subscription, timezone.now() - REPLAY_PERIOD)
                 except CloudAPIError as exc:
