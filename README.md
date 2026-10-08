@@ -13,7 +13,7 @@ It runs on your machine only. It reads from the cloud, and changes a cluster onl
   - Fields set by the API server are removed, and `status` is kept apart from the manifest.
   - Secrets keep their values. The UI can decode them.
 - **Billing:** find the billing account paying for each account, read its budgets, and follow spend through the budget notifications the provider sends to Pub/Sub. Several accounts can share one billing account and its credits. `billing.services.billing.spend_status(account)` tells how much of the budget covering an account is used.
-- **Moves:** copy namespaces, with their objects and volume data, to a cluster in another account when its budget is close to used up. [Velero](https://velero.io) does the copy through a bucket in the target account; CloudHop runs the steps, including a cutover that stops the source first. See [docs/moves.md](docs/moves.md).
+- **Moves:** copy namespaces to a cluster in another account when its budget is close to used up: their objects only, which CloudHop applies itself, or with their volume data through [Velero](https://velero.io) and a bucket in the target account. A cutover scales the source down; or the source keeps running. See [docs/moves.md](docs/moves.md).
 
 Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 
@@ -27,7 +27,7 @@ Only **Google Cloud** (GKE) is supported for now. AWS and Azure are planned.
 | `clusters/` | Kubernetes clusters of each account |
 | `kubernetes/` | Resources stored from each cluster |
 | `billing/` | Billing accounts, budgets and spend updates |
-| `moves/` | Moves of namespaces between clusters, run step by step with Velero |
+| `moves/` | Moves of namespaces between clusters, run step by step: manifests applied by CloudHop, or Velero |
 | `common/` | Shared code: cloud errors, the provider adapter registry, the GCP and Kubernetes clients |
 | `frontend/` | Vue 3 + Vite UI |
 

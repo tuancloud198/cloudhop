@@ -32,14 +32,14 @@ class MoveSerializer(serializers.ModelSerializer):
     class Meta:
         model = Move
         fields = [
-            'id', 'source_cluster', 'target_cluster', 'namespaces', 'mode', 'storage_class_mapping',
+            'id', 'source_cluster', 'target_cluster', 'namespaces', 'method', 'mode', 'storage_class_mapping',
             'storage_location', 'status', 'steps', 'waiting_on', 'failed_step', 'error', 'backup_name',
             'restore_name', 'replicas', 'step_started_at', 'checked_at', 'finished_at', 'created_at', 'updated_at',
         ]
         read_only_fields = fields
 
     def get_steps(self, move):
-        return steps_of(move.mode)
+        return steps_of(move.method, move.mode)
 
 
 class MoveDetailSerializer(MoveSerializer):
@@ -54,6 +54,7 @@ class MoveCreateSerializer(serializers.Serializer):
     source_cluster = serializers.PrimaryKeyRelatedField(queryset=Clusters.objects.select_related('account_id'))
     target_cluster = serializers.PrimaryKeyRelatedField(queryset=Clusters.objects.select_related('account_id'))
     namespaces = serializers.ListField(child=serializers.CharField(max_length=63), allow_empty=False, max_length=50)
+    method = serializers.ChoiceField(choices=Move.Method.choices, default=Move.Method.VELERO)
     mode = serializers.ChoiceField(choices=Move.Mode.choices, default=Move.Mode.CUTOVER)
     storage_class_mapping = serializers.DictField(
         child=serializers.CharField(max_length=253), required=False, default=dict

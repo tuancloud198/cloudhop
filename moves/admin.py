@@ -12,6 +12,6 @@ class MoveEventInline(admin.TabularInline):
 
 @admin.register(Move)
 class MoveAdmin(admin.ModelAdmin):
-    list_display = ("id", "source_cluster", "target_cluster", "mode", "status", "created_at")
-    list_filter = ("status", "mode")
+    list_display = ("id", "source_cluster", "target_cluster", "method", "mode", "status", "created_at")
+    list_filter = ("status", "method", "mode")
     inlines = [MoveEventInline]
