@@ -17,5 +17,7 @@ __pycache__/
 staticfiles/
 celerybeat-schedule*
 
-# Built by frontend/Dockerfile
+# Built by frontend.Dockerfile
 frontend/
+nginx.conf
+frontend.Dockerfile*

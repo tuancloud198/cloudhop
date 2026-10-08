@@ -1,0 +1,6 @@
+# Context of frontend.Dockerfile: the UI's sources and the nginx config only
+*
+!frontend/
+!nginx.conf
+frontend/node_modules/
+frontend/dist/

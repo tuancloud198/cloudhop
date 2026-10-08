@@ -93,7 +93,8 @@ services:
 
   fe:
     build:
-      context: ./frontend
+      context: .
+      dockerfile: frontend.Dockerfile
       args: *proxy-args
     image: cloudhop-frontend
     restart: unless-stopped
