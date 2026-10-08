@@ -57,4 +57,4 @@ Vue 3 + Vite + vue-router, plain CSS, no UI library. Colors are tokens in `src/s
 - `src/api.js` is the only place that calls the backend (`/api/v1/...`). Add a method there for each new endpoint; it sends the CSRF token and turns DRF errors into `ApiError` (`message`, `status`, `fields`).
 - `src/views/` holds one component per route (`router.js`); `src/components/` holds reusable pieces.
 - Shared state is a plain `reactive` object (`src/accounts.js`); notifications go through `notify()` in `src/toasts.js`.
-- In development, run Django on :8000 and `npm run dev` in `frontend/`; Vite proxies `/api` to Django (`CLOUDHOP_API` overrides the target). `CSRF_TRUSTED_ORIGINS` in settings allows the Vite origin.
+- In development, start PostgreSQL and Redis with `docker compose up -d postgres redis`, then run Django on :8000 and `npm run dev` in `frontend/`; Vite proxies `/api` to Django (`CLOUDHOP_API` overrides the target). `CSRF_TRUSTED_ORIGINS` in settings allows the Vite origin.

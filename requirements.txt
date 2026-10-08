@@ -3,3 +3,6 @@ djangorestframework
 google-auth[requests]
 requests
 celery[redis]
+psycopg[binary]
+gunicorn
+whitenoise

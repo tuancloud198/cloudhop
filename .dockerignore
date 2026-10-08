@@ -1,0 +1,21 @@
+# Keys and local data stay out of the image
+credentials/
+db.sqlite3*
+.env
+.env.*
+*.pem
+*.key
+*-sa.json
+*service-account*.json
+
+.git/
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+staticfiles/
+celerybeat-schedule*
+
+# Built by frontend/Dockerfile
+frontend/

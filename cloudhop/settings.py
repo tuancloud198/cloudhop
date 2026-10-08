@@ -23,12 +23,13 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-gi@^cjm0^_1w38xwc(j7sphroo2gc1q%9m+5s_k^*ow$2bbui-'
+SECRET_KEY = os.environ.get('DJANGO_SECRET_KEY', 'django-insecure-gi@^cjm0^_1w38xwc(j7sphroo2gc1q%9m+5s_k^*ow$2bbui-')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DJANGO_DEBUG', 'true').lower() == 'true'
 
-ALLOWED_HOSTS = []
+# Comma-separated; with DEBUG and none set, Django allows localhost
+ALLOWED_HOSTS = [host for host in os.environ.get('DJANGO_ALLOWED_HOSTS', '').split(',') if host]
 
 # The Vue dev server (frontend/) proxies /api here; its origin must pass the CSRF check
 CSRF_TRUSTED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
@@ -53,6 +54,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves the admin's and DRF's static files when gunicorn runs the app
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -90,16 +93,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Where uploaded cloud credential files are stored (kept out of git)
 CREDENTIALS_DIR = BASE_DIR / "credentials"
 
+# The defaults match the postgres service in compose.yaml, published on localhost
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-        'OPTIONS': {
-            # Celery workers write at the same time as the web server: wait for the lock
-            # instead of failing, and take it when a transaction starts so it cannot deadlock
-            'timeout': 20,
-            'transaction_mode': 'IMMEDIATE',
-        },
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': os.environ.get('POSTGRES_DB', 'cloudhop'),
+        'USER': os.environ.get('POSTGRES_USER', 'cloudhop'),
+        'PASSWORD': os.environ.get('POSTGRES_PASSWORD', 'cloudhop'),
+        'HOST': os.environ.get('POSTGRES_HOST', 'localhost'),
+        'PORT': os.environ.get('POSTGRES_PORT', '5432'),
     }
 }
 
@@ -139,6 +141,8 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+# collectstatic copies them here, for whitenoise
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 
 # Email
