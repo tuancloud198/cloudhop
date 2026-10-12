@@ -60,3 +60,23 @@ class MoveCreateSerializer(serializers.Serializer):
         child=serializers.CharField(max_length=253), required=False, default=dict
     )
     storage_location = serializers.CharField(max_length=253, required=False, default='default')
+
+
+class MoveSetupQuerySerializer(serializers.Serializer):
+    """What to check before a move: its clusters and how it would run."""
+
+    source_cluster = serializers.PrimaryKeyRelatedField(queryset=Clusters.objects.select_related('account_id'))
+    target_cluster = serializers.PrimaryKeyRelatedField(queryset=Clusters.objects.select_related('account_id'))
+    method = serializers.ChoiceField(choices=Move.Method.choices, default=Move.Method.VELERO)
+    mode = serializers.ChoiceField(choices=Move.Mode.choices, default=Move.Mode.CUTOVER)
+    storage_location = serializers.CharField(max_length=253, required=False, default='default')
+    # The name the bucket is meant to get, checked while Velero is not installed yet
+    bucket = serializers.RegexField(
+        r'^[a-z0-9][a-z0-9._-]{1,220}[a-z0-9]$', required=False, allow_blank=True, default='',
+        error_messages={'invalid': 'not a valid bucket name'},
+    )
+
+    def validate(self, attrs):
+        if attrs['source_cluster'].pk == attrs['target_cluster'].pk:
+            raise serializers.ValidationError({'target_cluster': 'the source and target must be different clusters'})
+        return attrs

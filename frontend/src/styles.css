@@ -16,6 +16,13 @@
   --warning: light-dark(#b45309, #e3a33f);
   --warning-soft: light-dark(#fdf3e2, #362813);
   --code-bg: light-dark(#f6f8fa, #12151a);
+  /* Where a move setup step runs: your machine, the source cluster, the destination */
+  --scope-local: light-dark(#6d28d9, #b49cf7);
+  --scope-local-soft: light-dark(#f1ebfe, #2a2140);
+  --scope-source: light-dark(#1d4ed8, #7aa2f7);
+  --scope-source-soft: light-dark(#e6edfd, #1b2744);
+  --scope-target: light-dark(#0f766e, #3fc8b6);
+  --scope-target-soft: light-dark(#e0f4f1, #12302d);
   /* The today line on a spend meter */
   --meter-marker: light-dark(#ffffff, #e6e8ec);
   --shadow:

@@ -14,10 +14,6 @@ PAGE_SIZE = 500
 class KubeAPIError(CloudAPIError):
     """A call to a Kubernetes API server failed; the message is safe to show to the user."""
 
-    def __init__(self, message: str, status_code: int | None = None):
-        super().__init__(message)
-        self.status_code = status_code
-
 
 class KubeClient:
     """Calls a Kubernetes API server with a bearer token. Reads, plus the writes moves need.

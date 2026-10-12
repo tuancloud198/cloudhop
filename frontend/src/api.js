@@ -89,6 +89,9 @@ export const api = {
   getMove: (id) => request('GET', `/moves/${id}/`),
   // data: {source_cluster, target_cluster, namespaces, mode, storage_class_mapping, storage_location}
   createMove: (data) => request('POST', '/moves/', { body: data }),
+  // params: source_cluster, target_cluster, method, mode, storage_location, bucket. Returns {checks, bucket}:
+  // what such a move needs set up in both clusters, and whether it is; starts nothing
+  checkMoveSetup: (params) => request('GET', '/moves/setup/', { params }),
   cancelMove: (id) => request('POST', `/moves/${id}/cancel/`),
   retryMove: (id) => request('POST', `/moves/${id}/retry/`),
 }

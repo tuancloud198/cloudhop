@@ -7,9 +7,11 @@ from rest_framework.test import APITestCase
 
 from accounts.models.account import Account
 from clusters.models.cluster import Clusters
+from common.cloud.errors import CloudAPIError
 from common.kube.client import KubeAPIError
+from moves.adapters.gcp import GCPBucketAdapter
 from moves.models.move import Move
-from moves.services.move import advance, cancel_move, create_move, retry_move
+from moves.services.move import advance, cancel_move, create_move, read_velero, retry_move, velero_problems
 from moves.tasks import advance_move, resume_moves
 
 VELERO = "/apis/velero.io/v1/namespaces/velero"
@@ -60,8 +62,15 @@ class FakeKube:
         return answer
 
 
-def velero_ready(kube, read_only=False, bucket="cloudhop-moves"):
+def velero_ready(kube, read_only=False, bucket="cloudhop-moves", version="v1.18.4", plugin="v1.14.4",
+                 features="EnableCSI"):
     kube.responses["/apis/velero.io/v1"] = {}
+    # As velero install creates it
+    kube.responses["/apis/apps/v1/namespaces/velero/deployments/velero"] = {"spec": {"template": {"spec": {
+        "containers": [{"name": "velero", "image": f"velero/velero:{version}",
+                        "args": ["server", f"--features={features}", "--uploader-type=kopia"]}],
+        "initContainers": [{"name": "velero-velero-plugin-for-gcp", "image": f"velero/velero-plugin-for-gcp:{plugin}"}],
+    }}}}
     kube.responses[f"{VELERO}/backupstoragelocations/default"] = {
         "spec": {"objectStorage": {"bucket": bucket}, **({"accessMode": "ReadOnly"} if read_only else {})},
         "status": {"phase": "Available"},
@@ -134,7 +143,7 @@ class MoveTestCase(APITestCase):
         source.responses["/api/v1/namespaces/shop"] = {}
         source.lists["/api/v1/namespaces/shop/persistentvolumeclaims"] = [{"spec": {"storageClassName": "standard-rwo"}}]
         source.lists["/apis/snapshot.storage.k8s.io/v1/volumesnapshotclasses"] = [
-            {"metadata": {"labels": {"velero.io/csi-volumesnapshot-class": "true"}}}
+            {"metadata": {"name": "velero-pd", "labels": {"velero.io/csi-volumesnapshot-class": "true"}}}
         ]
         target.responses["/apis/storage.k8s.io/v1/storageclasses/standard-rwo"] = {}
 
@@ -171,7 +180,8 @@ class MoveRunTests(MoveTestCase):
         self.assertEqual(body["spec"]["includedNamespaces"], ["shop"])
         self.assertTrue(body["spec"]["snapshotMoveData"])
 
-        source.responses[backup] = [{"status": {"phase": "Completed", "progress": {"itemsBackedUp": 10}}}]
+        source.responses[backup] = [{"status": {"phase": "Completed", "progress": {"itemsBackedUp": 10},
+                                                "backupItemOperationsCompleted": 1}}]
         # The target's Velero has not listed the bucket yet
         target.responses[backup] = [NOT_FOUND]
         self.advance_until_waiting(move)
@@ -318,6 +328,44 @@ class MoveCheckTests(MoveTestCase):
     def test_mapped_storage_class_missing_in_target(self):
         self.ready_to_check()
         self.check_fails("no storage class standard-rwo (as fast)", storage_class_mapping={"standard-rwo": "fast"})
+
+    def test_velero_without_csi_support(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["source"], features="")
+        self.check_fails("Velero in the source cluster cannot copy these namespaces: its CSI support is off")
+
+    def test_velero_without_csi_support_is_fine_without_volumes(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["source"], features="")
+        self.kubes["source"].lists["/api/v1/namespaces/shop/persistentvolumeclaims"] = []
+        move = self.move()
+        self.advance_until_waiting(move)
+        self.assertNotEqual(move.failed_step, Move.Status.CHECKING, move.error)
+        self.assertTrue(move.events.filter(message__startswith="Checked:").exists())
+
+    def test_gcp_plugin_not_matching_velero(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["target"], read_only=True, plugin="v1.12.0")
+        self.check_fails("its GCP plugin v1.12.0 does not work with Velero v1.18.4; it needs v1.14.x")
+
+    def test_different_velero_versions_are_a_warning(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["target"], read_only=True, version="v1.17.1", plugin="v1.13.2")
+        move = self.move()
+        self.advance_until_waiting(move)
+        self.assertNotEqual(move.failed_step, Move.Status.CHECKING, move.error)
+        self.assertTrue(move.events.filter(level="warning", message__contains="v1.18.4 in the source").exists())
+
+    def test_backup_without_volume_data_fails(self):
+        self.ready_to_check()
+        move = self.move(mode=Move.Mode.COPY)
+        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [
+            {"status": {"phase": "Completed", "warnings": 1}}
+        ]
+        self.assertIsNone(self.advance_until_waiting(move))
+        self.assertEqual((move.status, move.failed_step), (Move.Status.FAILED, Move.Status.BACKING_UP))
+        self.assertIn("copied the data of 0 of 1 volume", move.error)
+        self.assertIn("--features=EnableCSI", move.error)
 
     def test_no_snapshot_class_for_velero(self):
         self.ready_to_check()
@@ -565,3 +613,349 @@ class MoveTaskTests(MoveTestCase):
             resume_moves()
 
         delay.assert_called_once_with(lost.pk)
+
+
+class SetupKube(FakeKube):
+    """A FakeKube that answers access reviews: allowed for the (verb, resource) pairs given."""
+
+    def __init__(self, allowed=()):
+        super().__init__()
+        self.allowed = set(allowed)
+
+    def post(self, path, body):
+        if path != "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews":
+            return super().post(path, body)
+        attributes = body["spec"]["resourceAttributes"]
+        resource = attributes["resource"] + (f"/{attributes['subresource']}" if attributes["subresource"] else "")
+        return {"status": {"allowed": (attributes["verb"], resource) in self.allowed}}
+
+
+VELERO_SOURCE_ACCESS = [("get", "deployments"), ("create", "backups"), ("get", "backupstoragelocations"), ("list", "volumesnapshotclasses"),
+                        ("patch", "deployments/scale"), ("patch", "statefulsets/scale")]
+VELERO_TARGET_ACCESS = [("get", "deployments"), ("create", "restores"), ("get", "backupstoragelocations"), ("create", "configmaps"),
+                        ("patch", "deployments/scale"), ("patch", "statefulsets/scale")]
+
+
+class MoveSetupTests(MoveTestCase):
+    def setUp(self):
+        super().setUp()
+        self.kubes = {"source": SetupKube(VELERO_SOURCE_ACCESS), "target": SetupKube(VELERO_TARGET_ACCESS)}
+
+        @contextmanager
+        def fake_kube(cluster):
+            yield self.kubes[cluster.name]
+
+        patch = mock.patch("moves.services.setup._kube", fake_kube)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+        # The bucket, as the target's account reads it: a dict, None (no such bucket) or an error
+        self.bucket = {"name": "cloudhop-moves", "location": "asia-southeast1", "in_account": True,
+                       "owner": "target-project"}
+        self.buckets_read = []
+
+        def get_bucket(name):
+            self.buckets_read.append(name)
+            if isinstance(self.bucket, Exception):
+                raise self.bucket
+            return self.bucket
+
+        # What Velero's identity lacks on the bucket's objects: a list or an error
+        self.missing_access = []
+
+        def missing_backup_access(name):
+            if isinstance(self.missing_access, Exception):
+                raise self.missing_access
+            return self.missing_access
+
+        identity = mock.Mock(return_value="cloudhop@target-project.iam.gserviceaccount.com")
+        patch = mock.patch("moves.services.setup.BucketAdapter.for_account", return_value=mock.Mock(
+            get_bucket=get_bucket, identity=identity, missing_backup_access=missing_backup_access,
+            backup_role="roles/storage.objectAdmin",
+        ))
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def check(self, **params):
+        response = self.client.get("/api/v1/moves/setup/", {
+            "source_cluster": self.source_cluster.pk, "target_cluster": self.target_cluster.pk, **params,
+        })
+        self.assertEqual(response.status_code, 200, response.data)
+        return response.data, {(c["key"], c["cluster"]): c for c in response.data["checks"]}
+
+    def test_velero_ready_in_both_clusters(self):
+        self.ready_to_check()
+
+        data, checks = self.check(method="velero")
+
+        self.assertEqual({c["status"] for c in data["checks"]}, {"ok"}, data["checks"])
+        self.assertEqual(data["bucket"], "cloudhop-moves")
+        self.assertIn("Both clusters use gs://cloudhop-moves", checks[("bucket", "")]["detail"])
+        # Velero reuses the target account's service account
+        self.assertEqual(data["identity"], "cloudhop@target-project.iam.gserviceaccount.com")
+        self.assertEqual(set(checks), {
+            ("snapshot_class", "source"), ("velero", "source"), ("storage_location", "source"), ("access", "source"),
+            ("velero", "target"), ("storage_location", "target"), ("access", "target"), ("bucket", ""),
+            ("bucket_access", ""),
+        })
+
+    def test_velero_missing_in_the_target(self):
+        velero_ready(self.kubes["source"])
+
+        data, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("velero", "target")]["status"], "missing")
+        self.assertEqual(checks[("storage_location", "target")]["status"], "unknown")
+        self.assertEqual(checks[("snapshot_class", "source")]["status"], "missing")
+        # The bucket the source's Velero uses is checked, and given back for the target's commands
+        self.assertEqual(checks[("bucket", "")]["status"], "ok")
+        self.assertEqual(self.buckets_read, ["cloudhop-moves"])
+        self.assertEqual(data["bucket"], "cloudhop-moves")
+
+    def test_different_buckets_and_a_writable_target(self):
+        velero_ready(self.kubes["source"], bucket="one")
+        velero_ready(self.kubes["target"], bucket="two")
+
+        _, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "missing")
+        self.assertIn("gs://one", checks[("bucket", "")]["detail"])
+        self.assertEqual(checks[("storage_location", "target")]["status"], "warning")
+
+    def test_unavailable_storage_location(self):
+        self.ready_to_check()
+        self.kubes["target"].responses[f"{VELERO}/backupstoragelocations/default"]["status"]["phase"] = "Unavailable"
+
+        _, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("storage_location", "target")]["status"], "missing")
+        self.assertIn("Unavailable", checks[("storage_location", "target")]["detail"])
+
+    def test_access_names_what_is_denied(self):
+        self.ready_to_check()
+        self.kubes["target"].allowed = {("get", "backupstoragelocations"), ("get", "deployments")}
+
+        _, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("access", "source")]["status"], "ok")
+        self.assertEqual(checks[("access", "target")]["status"], "missing")
+        self.assertIn("create restores.velero.io in velero", checks[("access", "target")]["detail"])
+        self.assertIn("patch deployments.apps/scale", checks[("access", "target")]["detail"])
+
+    def test_manifests_copy_needs_no_scaling_or_velero(self):
+        self.kubes["source"].allowed = {("list", "secrets")}
+        self.kubes["target"].allowed = {("create", "namespaces"), ("patch", "namespaces"), ("patch", "secrets"),
+                                        ("patch", "deployments")}
+
+        data, checks = self.check(method="manifests", mode="copy")
+
+        self.assertEqual(set(checks), {("access", "source"), ("access", "target")})
+        self.assertEqual({c["status"] for c in data["checks"]}, {"ok"})
+        self.assertIsNone(data["bucket"])
+        self.assertIsNone(data["identity"])
+
+    def test_manifests_cutover_scales_the_source(self):
+        self.kubes["source"].allowed = {("list", "secrets")}
+
+        _, checks = self.check(method="manifests", mode="cutover")
+
+        self.assertIn("patch deployments.apps/scale", checks[("access", "source")]["detail"])
+
+    def test_unreachable_cluster(self):
+        @contextmanager
+        def unreachable(cluster):
+            raise CloudAPIError("permission denied")
+            yield
+
+        with mock.patch("moves.services.setup._kube", unreachable):
+            _, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("connect", "source")]["status"], "missing")
+        self.assertIn("permission denied", checks[("connect", "source")]["detail"])
+
+    def test_same_cluster_is_refused(self):
+        response = self.client.get("/api/v1/moves/setup/", {
+            "source_cluster": self.source_cluster.pk, "target_cluster": self.source_cluster.pk,
+        })
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_velero_install_problems(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["source"], features="", plugin="v1.12.0")
+
+        _, checks = self.check(method="velero")
+
+        velero = checks[("velero", "source")]
+        self.assertEqual(velero["status"], "missing")
+        self.assertIn("Velero v1.18.4 is installed, but its CSI support is off", velero["detail"])
+        self.assertIn("it needs v1.14.x", velero["detail"])
+        self.assertEqual(checks[("velero", "target")]["status"], "ok")
+        self.assertIn("with CSI support and GCP plugin v1.14.4", checks[("velero", "target")]["detail"])
+
+    def test_velero_versions_differ(self):
+        self.ready_to_check()
+        velero_ready(self.kubes["target"], read_only=True, version="v1.17.1", plugin="v1.13.2")
+
+        _, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("velero", "target")]["status"], "warning")
+        self.assertIn("The source runs Velero v1.18.4", checks[("velero", "target")]["detail"])
+
+    def test_bucket_named_before_velero_is_installed(self):
+        data, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(self.buckets_read, ["my-bucket"])
+        self.assertEqual(checks[("bucket", "")]["status"], "ok")
+        self.assertIn("exists in target-project", checks[("bucket", "")]["detail"])
+        self.assertEqual(data["bucket"], "my-bucket")
+
+    def test_bucket_not_created_yet(self):
+        self.bucket = None
+
+        _, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "missing")
+        self.assertIn("no bucket gs://my-bucket", checks[("bucket", "")]["detail"])
+        self.assertEqual(checks[("bucket_access", "")]["status"], "unknown")
+
+    def test_bucket_cloudhop_may_not_read(self):
+        self.bucket = CloudAPIError("gs://my-bucket exists, but cloudhop@x may not read it. Grant it: ...", 403)
+
+        _, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "unknown")
+        self.assertTrue(checks[("bucket", "")]["detail"].startswith("gs://my-bucket exists, but"))
+        # Velero's access is asked for all the same
+        self.assertEqual(checks[("bucket_access", "")]["status"], "ok")
+
+    def test_bucket_in_another_project(self):
+        self.bucket = {**self.bucket, "in_account": False, "owner": "project number 42"}
+
+        _, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "warning")
+        self.assertIn("project number 42", checks[("bucket", "")]["detail"])
+
+    def test_velero_may_not_write_backups(self):
+        self.missing_access = ["storage.objects.create", "storage.objects.delete"]
+
+        _, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "ok")
+        self.assertEqual(checks[("bucket_access", "")]["status"], "missing")
+        detail = checks[("bucket_access", "")]["detail"]
+        self.assertIn("cloudhop@target-project.iam.gserviceaccount.com", detail)
+        self.assertIn("storage.objects.create, storage.objects.delete", detail)
+        self.assertIn("roles/storage.objectAdmin", detail)
+
+    def test_velero_access_cannot_be_asked(self):
+        self.missing_access = CloudAPIError("cannot reach GCP, try again later")
+
+        _, checks = self.check(method="velero", bucket="my-bucket")
+
+        self.assertEqual(checks[("bucket_access", "")]["status"], "unknown")
+
+    def test_no_bucket_name(self):
+        data, checks = self.check(method="velero")
+
+        self.assertEqual(checks[("bucket", "")]["status"], "unknown")
+        self.assertEqual(self.buckets_read, [])
+        self.assertIsNone(data["bucket"])
+
+    def test_invalid_bucket_name_is_refused(self):
+        response = self.client.get("/api/v1/moves/setup/", {
+            "source_cluster": self.source_cluster.pk, "target_cluster": self.target_cluster.pk, "bucket": "Not/A{bucket}",
+        })
+
+        self.assertEqual(response.status_code, 400)
+
+
+class GCPBucketAdapterTests(MoveTestCase):
+    def adapter(self):
+        adapter = GCPBucketAdapter(self.target_cluster.account_id)
+        adapter.credential = {"client_email": "cloudhop@target-project.iam.gserviceaccount.com"}
+        return adapter
+
+    def get(self, *answers):
+        return mock.patch("moves.adapters.gcp.GCPClient.get", side_effect=answers)
+
+    def test_bucket_in_the_account(self):
+        with self.get({"name": "b", "location": "ASIA-SOUTHEAST1", "projectNumber": "123"},
+                      {"name": "projects/123"}) as get:
+            bucket = self.adapter().get_bucket("b")
+
+        self.assertEqual(bucket, {"name": "b", "location": "asia-southeast1", "in_account": True,
+                                  "owner": "target-project"})
+        self.assertIn("/storage/v1/b/b?", get.call_args_list[0].args[0])
+
+    def test_bucket_in_another_project(self):
+        with self.get({"name": "b", "projectNumber": "999"}, {"name": "projects/123"}):
+            bucket = self.adapter().get_bucket("b")
+
+        self.assertFalse(bucket["in_account"])
+        self.assertEqual(bucket["owner"], "project number 999")
+
+    def test_no_such_bucket(self):
+        with self.get(CloudAPIError("not found", 404)):
+            self.assertIsNone(self.adapter().get_bucket("b"))
+
+    def test_bucket_that_may_not_be_read_says_what_to_grant(self):
+        with self.get(CloudAPIError("permission denied", 403)), self.assertRaises(CloudAPIError) as caught:
+            self.adapter().get_bucket("b")
+
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertIn("--member serviceAccount:cloudhop@target-project.iam.gserviceaccount.com",
+                      str(caught.exception))
+        self.assertIn("roles/storage.legacyBucketReader", str(caught.exception))
+
+    def test_missing_backup_access(self):
+        with self.get({"permissions": ["storage.objects.get", "storage.objects.list"]}) as get:
+            missing = self.adapter().missing_backup_access("b")
+
+        self.assertEqual(missing, ["storage.objects.create", "storage.objects.delete"])
+        self.assertIn("/storage/v1/b/b/iam/testPermissions?permissions=storage.objects.create", get.call_args.args[0])
+
+    def test_all_backup_access(self):
+        with self.get({"permissions": ["storage.objects.create", "storage.objects.get", "storage.objects.list",
+                                       "storage.objects.delete"]}):
+            self.assertEqual(self.adapter().missing_backup_access("b"), [])
+
+    def test_no_backup_access(self):
+        # Cloud Storage leaves the list out when the caller has none of the permissions
+        with self.get({}):
+            self.assertEqual(len(self.adapter().missing_backup_access("b")), 4)
+
+    def test_other_failures_pass_through(self):
+        with self.get(CloudAPIError("GCP returned 500", 500)), self.assertRaises(CloudAPIError) as caught:
+            self.adapter().get_bucket("b")
+
+        self.assertEqual(caught.exception.status_code, 500)
+
+
+class VeleroInstallTests(APITestCase):
+    def test_read_velero(self):
+        kube = FakeKube()
+        velero_ready(kube, version="v1.18.4", plugin="v1.14.4", features="EnableCSI,EnableAPIGroupVersions")
+
+        self.assertEqual(read_velero(kube), {
+            "version": "v1.18.4",
+            "features": {"EnableCSI", "EnableAPIGroupVersions"},
+            "plugins": {"velero/velero-plugin-for-gcp": "v1.14.4"},
+        })
+        self.assertIsNone(read_velero(FakeKube()))
+
+    def test_matching_plugins(self):
+        for version, plugin in (("v1.18.4", "v1.14.4"), ("v1.16.0", "v1.12.0"), ("v1.14.1", "v1.10.2")):
+            velero = {"version": version, "features": {"EnableCSI"}, "plugins": {"velero/velero-plugin-for-gcp": plugin}}
+            self.assertEqual(velero_problems(velero), [], (version, plugin))
+
+    def test_problems(self):
+        velero = {"version": "v1.18.4", "features": set(), "plugins": {}}
+
+        problems = velero_problems(velero)
+
+        self.assertEqual(len(problems), 2)
+        self.assertIn("CSI support is off", problems[0])
+        self.assertIn("no GCP plugin", problems[1])
+        self.assertEqual(len(velero_problems(velero, volumes=False)), 1)

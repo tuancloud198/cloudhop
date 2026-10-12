@@ -74,7 +74,7 @@ class GCPClient:
                 "GCP request %s %s failed for project %s: %s %s",
                 method, url, self.project_id, response.status_code, response.text[:200],
             )
-            raise error_cls(self._error_reason(response))
+            raise error_cls(self._error_reason(response), response.status_code)
 
         return response.json()
 

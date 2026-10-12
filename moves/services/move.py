@@ -47,6 +47,13 @@ STEP_TIMEOUTS = {
     Status.VERIFYING: timedelta(minutes=20),
 }
 
+# Velero's server, as `velero install` names it, and the GCP plugin it loads as an init container
+VELERO_DEPLOYMENT = f"/apis/apps/v1/namespaces/{VELERO_NAMESPACE}/deployments/velero"
+GCP_PLUGIN = "velero/velero-plugin-for-gcp"
+# Velero only takes CSI snapshots, which snapshotMoveData copies into the bucket, with this feature
+CSI_FEATURE = "EnableCSI"
+VERSION = re.compile(r"v?(\d+)\.(\d+)")
+
 # Velero Backup and Restore phases that end them without success
 FAILED_PHASES = {"Failed", "FailedValidation", "PartiallyFailed"}
 # Workloads a cutover scales down, and up again in the target
@@ -68,6 +75,43 @@ CLUSTER_ANNOTATIONS = {"deployment.kubernetes.io/revision", "cloud.google.com/ne
 JOB_LABELS = ("controller-uid", "batch.kubernetes.io/controller-uid")
 
 DONE, WAIT = "done", "wait"
+
+
+def read_velero(kube: KubeClient) -> dict | None:
+    """The Velero server in the cluster: {version, features, plugins}; None if it has no velero Deployment.
+
+    plugins maps each plugin image to its tag. Raises KubeAPIError if the Deployment cannot be read.
+    """
+    deployment = _get_or_none(kube, VELERO_DEPLOYMENT)
+    if deployment is None:
+        return None
+    spec = deployment["spec"]["template"]["spec"]
+    server = next((c for c in spec["containers"] if c["name"] == "velero"), spec["containers"][0])
+    features = set()
+    for arg in server.get("args") or []:
+        if arg.startswith("--features="):
+            features |= {feature for feature in arg.split("=", 1)[1].split(",") if feature}
+    plugins = dict(_image_tag(c["image"]) for c in spec.get("initContainers") or [])
+    return {"version": _image_tag(server["image"])[1], "features": features, "plugins": plugins}
+
+
+def velero_problems(velero: dict, volumes: bool = True) -> list[str]:
+    """What is wrong with a Velero install (from read_velero) for moves; volumes: whether it copies any."""
+    problems = []
+    if volumes and CSI_FEATURE not in velero["features"]:
+        problems.append(f"its CSI support is off (--features={CSI_FEATURE}), so it copies no volume data")
+    plugin = velero["plugins"].get(GCP_PLUGIN)
+    if plugin is None:
+        problems.append(f"it has no GCP plugin ({GCP_PLUGIN})")
+    else:
+        # The plugin's compatibility table: plugin 1.14 for Velero 1.18, 1.12 for 1.16, ... 1.9 for 1.13
+        server, loaded = VERSION.match(velero["version"]), VERSION.match(plugin)
+        if server and loaded and int(server[1]) == 1 and int(server[2]) >= 13:
+            wanted = int(server[2]) - 4
+            if (int(loaded[1]), int(loaded[2])) != (1, wanted):
+                problems.append(f"its GCP plugin {plugin} does not work with Velero {velero['version']}; "
+                                f"it needs v1.{wanted}.x")
+    return problems
 
 
 class InvalidMove(Exception):
@@ -239,11 +283,12 @@ def _check(move: Move) -> str:
 def _check_velero(move: Move) -> str:
     """Velero ready on one bucket, namespaces free, storage classes known."""
     with _kube(move.source_cluster) as source, _kube(move.target_cluster) as target:
-        locations = {}
+        locations, installs = {}, {}
         for side, kube in (("source", source), ("target", target)):
             if not _exists(kube, "/apis/velero.io/v1"):
                 raise MoveError(f"Velero is not installed in the {side} cluster. See the Guide, under Moves.")
             locations[side] = _storage_location(kube, side, move.storage_location)
+            installs[side] = read_velero(kube)
 
         buckets = {side: (loc["spec"].get("objectStorage") or {}) for side, loc in locations.items()}
         if (buckets["source"].get("bucket"), buckets["source"].get("prefix")) != (
@@ -264,6 +309,15 @@ def _check_velero(move: Move) -> str:
             for claim in source.list(f"/api/v1/namespaces/{namespace}/persistentvolumeclaims"):
                 classes.add(claim["spec"].get("storageClassName") or "")
                 claims += 1
+
+        for side, velero in installs.items():
+            problems = velero_problems(velero, volumes=bool(claims)) if velero else []
+            if problems:
+                raise MoveError(f"Velero in the {side} cluster cannot copy these namespaces: {'; '.join(problems)}. "
+                                f"See the Guide, under Moves.")
+        if installs["source"] and installs["target"] and installs["source"]["version"] != installs["target"]["version"]:
+            _log(move, f"Velero is {installs['source']['version']} in the source and {installs['target']['version']} "
+                       f"in the target; the same version in both is safer.", level=MoveEvent.Level.WARNING)
 
         missing = sorted(
             f"{name} (as {move.storage_class_mapping[name]})" if name in move.storage_class_mapping else name
@@ -404,12 +458,26 @@ def _back_up(move: Move) -> str:
             _log(move, f"Started Velero backup {name} in the source")
 
         backup = kube.get(f"{VELERO}/backups/{move.backup_name}")
+        status = backup.get("status") or {}
+        phase = status.get("phase") or "New"
+        if phase == "Completed":
+            claims = sum(len(kube.list(f"/api/v1/namespaces/{namespace}/persistentvolumeclaims"))
+                         for namespace in move.namespaces)
 
-    status = backup.get("status") or {}
-    phase = status.get("phase") or "New"
     if phase == "Completed":
+        # Each volume's data is copied by an operation of its own (a DataUpload); without them the
+        # restore gives the target empty volumes, and the backup still says Completed
+        copied = status.get("backupItemOperationsCompleted", 0)
+        if copied < claims:
+            raise MoveError(
+                f"Velero backup {move.backup_name} completed but copied the data of {copied} of {claims} "
+                f"volume{'s' if claims != 1 else ''}, so the target would get empty volumes. Check that Velero runs "
+                f"with --features={CSI_FEATURE} in both clusters. For details run in the source cluster: "
+                f"velero backup describe {move.backup_name} --details"
+            )
         progress = status.get("progress") or {}
-        _log(move, f"Backup {move.backup_name} completed: {progress.get('itemsBackedUp', '?')} objects")
+        volumes = f", data of {copied} volume{'s' if copied != 1 else ''}" if claims else ""
+        _log(move, f"Backup {move.backup_name} completed: {progress.get('itemsBackedUp', '?')} objects{volumes}")
         return DONE
     if phase in FAILED_PHASES:
         reason = status.get("failureReason") or "; ".join(status.get("validationErrors") or []) or "see its logs"
@@ -691,6 +759,15 @@ def _describe(item: dict, kind: str | None = None) -> str:
     metadata = item.get("metadata", {})
     name = f"{metadata['namespace']}/{metadata['name']}" if metadata.get("namespace") else metadata.get("name", "?")
     return f"{kind} {name}" if kind else name
+
+
+def _image_tag(image: str) -> tuple[str, str]:
+    """("velero/velero", "v1.18.4") for "velero/velero:v1.18.4"; a digest or no tag gives ""."""
+    name, _, tag = image.split("@")[0].rpartition(":")
+    if not name or "/" in tag:
+        return image.split("@")[0], ""
+    # Docker Hub images may be written in full
+    return name.removeprefix("docker.io/"), tag
 
 
 def _some(names: list[str], limit: int = 5) -> str:
