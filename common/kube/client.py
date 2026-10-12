@@ -89,10 +89,13 @@ class KubeClient:
 
         return response.json()
 
-    def list(self, path: str) -> list[dict]:
-        """GET every item of a list path, following pagination."""
+    def list(self, path: str, params: dict | None = None) -> list[dict]:
+        """GET every item of a list path, following pagination.
+
+        params narrows the list, e.g. {"labelSelector": "app=web"} or {"fieldSelector": ...}.
+        """
         items = []
-        params = {"limit": PAGE_SIZE}
+        params = {**(params or {}), "limit": PAGE_SIZE}
         while True:
             data = self.get(path, params)
             items.extend(data.get("items", []))

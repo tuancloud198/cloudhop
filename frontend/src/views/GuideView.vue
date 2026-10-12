@@ -150,7 +150,7 @@ const installVelero = `# In each cluster, source and target, with kubectl pointi
 # The key is the target account's CloudHop key in both.
 ${veleroInstall({ bucket: 'BUCKET', secretFile: './cloudhop-key.json', pluginVersion: 'PLUGIN_VERSION' })}
 
-# In the target only: read the bucket, never write to it
+# In the target only: read the bucket, never write to it, and look for new backups every 10s
 ${READ_ONLY_LOCATION}
 
 # Both should say Available

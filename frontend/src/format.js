@@ -39,6 +39,29 @@ export function money(value, currency) {
   return number.toLocaleString(undefined, { style: 'currency', currency })
 }
 
+const BYTE_UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+
+// Bytes as Kubernetes sizes them, e.g. 4.0 GiB
+export function bytes(count) {
+  let unit = 0
+  while (count >= 1024 && unit < BYTE_UNITS.length - 1) {
+    count /= 1024
+    unit += 1
+  }
+  return unit ? `${count.toFixed(1)} ${BYTE_UNITS[unit]}` : `${count} B`
+}
+
+const QUANTITY_UNITS = {
+  Ki: 2 ** 10, Mi: 2 ** 20, Gi: 2 ** 30, Ti: 2 ** 40, Pi: 2 ** 50,
+  k: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15,
+}
+
+// A Kubernetes quantity ("8Gi", "500M", "1e9") in bytes; 0 if it cannot be read
+export function quantityBytes(value) {
+  const match = /^(\d+(?:\.\d+)?(?:e\d+)?)([KMGTP]i|[kMGTP])?$/.exec(String(value ?? '').trim())
+  return match ? Number(match[1]) * (QUANTITY_UNITS[match[2]] ?? 1) : 0
+}
+
 export function apiVersion(resource) {
   return resource.group ? `${resource.group}/${resource.version}` : resource.version
 }

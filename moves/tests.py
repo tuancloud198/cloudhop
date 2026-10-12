@@ -15,6 +15,7 @@ from moves.services.move import advance, cancel_move, create_move, read_velero, 
 from moves.tasks import advance_move, resume_moves
 
 VELERO = "/apis/velero.io/v1/namespaces/velero"
+VELERO_V2 = "/apis/velero.io/v2alpha1/namespaces/velero"
 NOT_FOUND = KubeAPIError("not found", 404)
 
 
@@ -35,7 +36,11 @@ class FakeKube:
     def get(self, path, params=None):
         return self._answer(self.responses, path, NOT_FOUND)
 
-    def list(self, path):
+    def list(self, path, params=None):
+        # A narrowed list answers from "path?selector" when the test set one
+        selector = (params or {}).get("labelSelector") or (params or {}).get("fieldSelector")
+        if selector and f"{path}?{selector}" in self.lists:
+            return self._answer(self.lists, f"{path}?{selector}", [])
         return self._answer(self.lists, path, [])
 
     def post(self, path, body):
@@ -63,7 +68,7 @@ class FakeKube:
 
 
 def velero_ready(kube, read_only=False, bucket="cloudhop-moves", version="v1.18.4", plugin="v1.14.4",
-                 features="EnableCSI"):
+                 features="EnableCSI", sync_period="10s"):
     kube.responses["/apis/velero.io/v1"] = {}
     # As velero install creates it
     kube.responses["/apis/apps/v1/namespaces/velero/deployments/velero"] = {"spec": {"template": {"spec": {
@@ -72,7 +77,8 @@ def velero_ready(kube, read_only=False, bucket="cloudhop-moves", version="v1.18.
         "initContainers": [{"name": "velero-velero-plugin-for-gcp", "image": f"velero/velero-plugin-for-gcp:{plugin}"}],
     }}}}
     kube.responses[f"{VELERO}/backupstoragelocations/default"] = {
-        "spec": {"objectStorage": {"bucket": bucket}, **({"accessMode": "ReadOnly"} if read_only else {})},
+        "spec": {"objectStorage": {"bucket": bucket},
+                 **({"accessMode": "ReadOnly", "backupSyncPeriod": sync_period} if read_only else {})},
         "status": {"phase": "Available"},
     }
 
@@ -122,6 +128,10 @@ class MoveTestCase(APITestCase):
         patch = mock.patch("moves.services.move._kube", fake_kube)
         patch.start()
         self.addCleanup(patch.stop)
+        # The random end of Velero object names
+        patch = mock.patch("moves.services.move.secrets.token_hex", return_value="abc123")
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def cluster(self, name):
         account = Account.objects.create(
@@ -165,14 +175,19 @@ class MoveRunTests(MoveTestCase):
         scale = "/apis/apps/v1/namespaces/shop/deployments/web/scale"
         source.responses[scale] = [{"spec": {"replicas": 2}, "status": {"replicas": 2}}, {"spec": {"replicas": 0}, "status": {}}]
         move = self.move()
-        backup = f"{VELERO}/backups/cloudhop-move-{move.pk}-1"
+        backup = f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"
 
         # Checked, then waiting for the source pods to stop
         self.assertEqual(self.advance_until_waiting(move), 15)
         self.assertEqual((move.status, move.replicas), (Move.Status.SCALING_DOWN, {"shop/Deployment/web": 2}))
         self.assertEqual(source.patches, [(scale, {"spec": {"replicas": 0}})])
 
-        source.responses[backup] = [{"status": {"phase": "InProgress", "progress": {"totalItems": 10, "itemsBackedUp": 3}}}]
+        # Not created yet, then running
+        source.responses[backup] = [
+            NOT_FOUND, {"status": {"phase": "InProgress", "progress": {"totalItems": 10, "itemsBackedUp": 3}}}
+        ]
+        self.advance_until_waiting(move)
+        self.assertEqual((move.status, move.waiting_on), (Move.Status.BACKING_UP, "Backup New"))
         self.advance_until_waiting(move)
         self.assertEqual((move.status, move.waiting_on), (Move.Status.BACKING_UP, "Backup InProgress: 3 of 10 objects"))
         path, body = source.posts[0]
@@ -189,14 +204,17 @@ class MoveRunTests(MoveTestCase):
         self.assertEqual(target.posts, [])
 
         target.responses[backup] = [{"status": {"phase": "Completed"}}]
-        target.responses[f"{VELERO}/restores/cloudhop-move-{move.pk}-1"] = [{"status": {"phase": "Completed"}}]
+        target.responses[f"{VELERO}/restores/cloudhop-move-{move.pk}-1-abc123"] = [NOT_FOUND, {"status": {"phase": "Completed"}}]
         target.responses[scale] = [{"spec": {"replicas": 0}}]
         target.lists["/apis/apps/v1/namespaces/shop/deployments"] = [
             {"metadata": {"name": "web"}, "spec": {"replicas": 2}, "status": {"readyReplicas": 1}}
         ]
+        # Starts the restore, then finds it completed
+        self.advance_until_waiting(move)
+        self.assertEqual((move.status, move.waiting_on), (Move.Status.RESTORING, "Restore New"))
         self.advance_until_waiting(move)
         self.assertEqual(move.status, Move.Status.VERIFYING)
-        self.assertEqual(target.posts[0][1]["spec"]["backupName"], f"cloudhop-move-{move.pk}-1")
+        self.assertEqual(target.posts[0][1]["spec"]["backupName"], f"cloudhop-move-{move.pk}-1-abc123")
         self.assertEqual(target.patches, [(scale, {"spec": {"replicas": 2}})])
         self.assertIn("Deployment shop/web 1/2 ready", move.waiting_on)
 
@@ -210,7 +228,7 @@ class MoveRunTests(MoveTestCase):
         source = self.kubes["source"]
         source.lists["/apis/apps/v1/namespaces/shop/deployments"] = [{"metadata": {"name": "web"}, "spec": {"replicas": 2}}]
         move = self.move(mode=Move.Mode.COPY)
-        source.responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [{"status": {"phase": "InProgress"}}]
+        source.responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"] = [{"status": {"phase": "InProgress"}}]
 
         self.advance_until_waiting(move)
 
@@ -220,7 +238,7 @@ class MoveRunTests(MoveTestCase):
     def test_failed_backup_is_retried_under_a_new_name(self):
         self.ready_to_check()
         move = self.move(mode=Move.Mode.COPY)
-        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [
+        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"] = [
             {"status": {"phase": "Failed", "failureReason": "bucket not reachable"}}
         ]
 
@@ -229,10 +247,10 @@ class MoveRunTests(MoveTestCase):
         self.assertIn("bucket not reachable", move.error)
 
         retry_move(move.pk)
-        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-2"] = [{"status": {"phase": "New"}}]
+        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-2-abc123"] = [{"status": {"phase": "New"}}]
         self.advance_until_waiting(move)
 
-        self.assertEqual((move.status, move.backup_name), (Move.Status.BACKING_UP, f"cloudhop-move-{move.pk}-2"))
+        self.assertEqual((move.status, move.backup_name), (Move.Status.BACKING_UP, f"cloudhop-move-{move.pk}-2-abc123"))
 
     def test_retried_scale_down_keeps_the_replicas_recorded_before(self):
         move = self.move()
@@ -245,7 +263,7 @@ class MoveRunTests(MoveTestCase):
         self.kubes["source"].responses["/apis/apps/v1/namespaces/shop/deployments/web/scale"] = [
             {"spec": {"replicas": 0}, "status": {}}
         ]
-        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [{"status": {}}]
+        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"] = [{"status": {}}]
 
         self.advance_until_waiting(move)
 
@@ -259,7 +277,7 @@ class MoveRunTests(MoveTestCase):
         move.status, move.backup_name = Move.Status.RESTORING, "cloudhop-move-1-1"
         move.save()
         target.responses[f"{VELERO}/backups/cloudhop-move-1-1"] = [{"status": {"phase": "Completed"}}]
-        target.responses[f"{VELERO}/restores/cloudhop-move-{move.pk}-1"] = [{"status": {"phase": "InProgress"}}]
+        target.responses[f"{VELERO}/restores/cloudhop-move-{move.pk}-1-abc123"] = [NOT_FOUND, {"status": {"phase": "InProgress"}}]
 
         self.advance_until_waiting(move)
 
@@ -267,6 +285,114 @@ class MoveRunTests(MoveTestCase):
         self.assertEqual(path, "/api/v1/namespaces/velero/configmaps")
         self.assertEqual(config["data"], {"standard-rwo": "premium-rwo"})
         self.assertEqual(config["metadata"]["labels"]["velero.io/change-storage-class"], "RestoreItemAction")
+
+    def stuck_restore(self, message, reason="ProvisioningFailed", minutes=5):
+        """A move restoring, with its one volume copy, started minutes ago, refused a disk with this message."""
+        created = (timezone.now() - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.ready_to_check()
+        target = self.kubes["target"]
+        move = self.move(mode=Move.Mode.COPY)
+        move.status, move.backup_name, move.restore_name = Move.Status.RESTORING, "b", "cloudhop-move-1-1-abc123"
+        move.save()
+        target.responses[f"{VELERO}/restores/cloudhop-move-1-1-abc123"] = [
+            {"status": {"phase": "WaitingForPluginOperations", "progress": {"totalItems": 11, "itemsRestored": 11}}}
+        ]
+        target.lists[f"{VELERO_V2}/datadownloads?velero.io/restore-name=cloudhop-move-1-1-abc123"] = [
+            {"metadata": {"name": "dd-1", "creationTimestamp": created},
+             "spec": {"targetVolume": {"namespace": "shop", "pvc": "data"}}, "status": {"phase": "Accepted"}},
+            {"metadata": {"name": "dd-done"}, "spec": {}, "status": {"phase": "Completed"}},
+        ]
+        target.lists["/api/v1/namespaces/velero/events?involvedObject.name=dd-1"] = [
+            {"type": "Normal", "reason": "Provisioning", "message": "provisioning", "lastTimestamp": "2026-10-12T07:30:00Z"},
+            {"type": "Warning", "reason": reason, "message": message, "lastTimestamp": "2026-10-12T07:29:00Z"},
+        ]
+        target.lists["/api/v1/namespaces/velero/events?involvedObject.name=dd-1"] += [
+            # The pod's, newer: its disk is not there yet
+            {"type": "Warning", "reason": "FailedScheduling", "eventTime": "2026-10-12T07:40:00.000001Z",
+             "message": 'persistentvolumeclaim "dd-1" not found'},
+        ] if "QUOTA" in message else []
+        return move
+
+    def test_restore_stuck_on_quota_fails_and_cancels_the_copy(self):
+        move = self.stuck_restore(
+            "rpc error: code = ResourceExhausted desc = operation failed (QUOTA_EXCEEDED): "
+            "Quota 'SSD_TOTAL_GB' exceeded.  Limit: 250.0 in region asia-southeast1."
+        )
+
+        self.assertIsNone(self.advance_until_waiting(move))
+
+        self.assertEqual((move.status, move.failed_step), (Move.Status.FAILED, Move.Status.RESTORING))
+        self.assertIn("refused a disk for copying volume shop/data: quota SSD_TOTAL_GB is used up "
+                      "(limit 250.0 in asia-southeast1)", move.error)
+        self.assertEqual(self.kubes["target"].patches, [(f"{VELERO_V2}/datadownloads/dd-1", {"spec": {"cancel": True}})])
+
+    def test_restore_stuck_for_another_reason_says_why(self):
+        move = self.stuck_restore("0/3 nodes are available: 3 Insufficient cpu.", reason="FailedScheduling")
+
+        self.assertEqual(self.advance_until_waiting(move), 15)
+
+        self.assertEqual(move.status, Move.Status.RESTORING)
+        self.assertEqual(move.waiting_on, "Restore WaitingForPluginOperations: 11 of 11 objects, preparing to copy "
+                                          "1 volume. Volume copy stuck: shop/data: FailedScheduling: 0/3 nodes are "
+                                          "available: 3 Insufficient cpu.")
+
+    def test_volume_copy_progress_and_size(self):
+        self.ready_to_check()
+        source = self.kubes["source"]
+        move = self.move(mode=Move.Mode.COPY)
+        move.status, move.backup_name = Move.Status.BACKING_UP, "cloudhop-move-1-1-abc123"
+        move.save()
+        backup = f"{VELERO}/backups/cloudhop-move-1-1-abc123"
+        uploads = f"{VELERO_V2}/datauploads?velero.io/backup-name=cloudhop-move-1-1-abc123"
+        source.responses[backup] = [{"status": {"phase": "WaitingForPluginOperations",
+                                                "progress": {"totalItems": 18, "itemsBackedUp": 18}}}]
+        source.lists[uploads] = [{"metadata": {"name": "du-1"}, "spec": {}, "status": {
+            "phase": "InProgress", "progress": {"bytesDone": 2 << 30, "totalBytes": 4315963725}}}]
+
+        self.assertEqual(self.advance_until_waiting(move), 15)
+        self.assertEqual(move.waiting_on,
+                         "Backup WaitingForPluginOperations: 18 of 18 objects, volume data 2.0 GiB of 4.0 GiB")
+
+        source.responses[backup] = [{"status": {"phase": "Completed", "backupItemOperationsCompleted": 1,
+                                                "progress": {"itemsBackedUp": 18}}}]
+        source.lists[uploads][0]["status"] = {"phase": "Completed", "progress": {"bytesDone": 4315963725,
+                                                                               "totalBytes": 4315963725}}
+        self.advance_until_waiting(move)
+        self.assertTrue(move.events.filter(message__endswith="18 objects, data of 1 volume (4.0 GiB)").exists())
+
+    def test_new_copy_waiting_for_its_disk_is_not_stuck(self):
+        move = self.stuck_restore('persistentvolumeclaim "dd-1" not found', reason="FailedScheduling", minutes=0)
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.waiting_on, "Restore WaitingForPluginOperations: 11 of 11 objects, preparing to copy 1 volume")
+
+    def test_new_copy_refused_quota_fails_at_once(self):
+        move = self.stuck_restore("QUOTA_EXCEEDED: Quota 'SSD_TOTAL_GB' exceeded. Limit: 250.0 in region r1.", minutes=0)
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual(move.status, Move.Status.FAILED)
+
+    def test_backup_stuck_on_quota_fails(self):
+        self.ready_to_check()
+        source = self.kubes["source"]
+        move = self.move(mode=Move.Mode.COPY)
+        move.status, move.backup_name = Move.Status.BACKING_UP, "cloudhop-move-1-1-abc123"
+        move.save()
+        source.responses[f"{VELERO}/backups/cloudhop-move-1-1-abc123"] = [{"status": {"phase": "WaitingForPluginOperations"}}]
+        source.lists[f"{VELERO_V2}/datauploads?velero.io/backup-name=cloudhop-move-1-1-abc123"] = [
+            {"metadata": {"name": "du-1"}, "spec": {"sourceNamespace": "shop", "sourcePVC": "data"}, "status": {"phase": "Prepared"}},
+        ]
+        source.lists["/api/v1/namespaces/velero/events?involvedObject.name=du-1"] = [
+            {"type": "Warning", "reason": "ProvisioningFailed", "lastTimestamp": "2026-10-12T07:29:00Z",
+             "message": "QUOTA_EXCEEDED: Quota 'SSD_TOTAL_GB' exceeded. Limit: 500.0 in region us-central1."},
+        ]
+
+        self.assertIsNone(self.advance_until_waiting(move))
+
+        self.assertEqual(move.failed_step, Move.Status.BACKING_UP)
+        self.assertIn("The source cluster's provider refused a disk for copying volume shop/data", move.error)
 
     def test_waiting_too_long_fails_the_step(self):
         move = self.move()
@@ -356,10 +482,25 @@ class MoveCheckTests(MoveTestCase):
         self.assertNotEqual(move.failed_step, Move.Status.CHECKING, move.error)
         self.assertTrue(move.events.filter(level="warning", message__contains="v1.18.4 in the source").exists())
 
+    def test_backup_left_by_an_earlier_move_of_the_same_number_is_not_taken(self):
+        self.ready_to_check()
+        move = self.move(mode=Move.Mode.COPY)
+        source = self.kubes["source"]
+        # From a move 1 of an earlier database: done, without volume data
+        source.responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [{"status": {"phase": "Completed"}}]
+        source.responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"] = [
+            NOT_FOUND, {"status": {"phase": "InProgress"}}
+        ]
+
+        self.advance_until_waiting(move)
+
+        self.assertEqual((move.status, move.backup_name), (Move.Status.BACKING_UP, f"cloudhop-move-{move.pk}-1-abc123"))
+        self.assertEqual(source.posts[0][1]["metadata"]["name"], f"cloudhop-move-{move.pk}-1-abc123")
+
     def test_backup_without_volume_data_fails(self):
         self.ready_to_check()
         move = self.move(mode=Move.Mode.COPY)
-        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1"] = [
+        self.kubes["source"].responses[f"{VELERO}/backups/cloudhop-move-{move.pk}-1-abc123"] = [
             {"status": {"phase": "Completed", "warnings": 1}}
         ]
         self.assertIsNone(self.advance_until_waiting(move))
@@ -630,9 +771,9 @@ class SetupKube(FakeKube):
         return {"status": {"allowed": (attributes["verb"], resource) in self.allowed}}
 
 
-VELERO_SOURCE_ACCESS = [("get", "deployments"), ("create", "backups"), ("get", "backupstoragelocations"), ("list", "volumesnapshotclasses"),
+VELERO_SOURCE_ACCESS = [("get", "deployments"), ("list", "datauploads"), ("list", "events"), ("create", "backups"), ("get", "backupstoragelocations"), ("list", "volumesnapshotclasses"),
                         ("patch", "deployments/scale"), ("patch", "statefulsets/scale")]
-VELERO_TARGET_ACCESS = [("get", "deployments"), ("create", "restores"), ("get", "backupstoragelocations"), ("create", "configmaps"),
+VELERO_TARGET_ACCESS = [("get", "deployments"), ("list", "datadownloads"), ("list", "events"), ("create", "restores"), ("get", "backupstoragelocations"), ("create", "configmaps"),
                         ("patch", "deployments/scale"), ("patch", "statefulsets/scale")]
 
 
@@ -722,6 +863,21 @@ class MoveSetupTests(MoveTestCase):
         self.assertIn("gs://one", checks[("bucket", "")]["detail"])
         self.assertEqual(checks[("storage_location", "target")]["status"], "warning")
 
+    def test_target_looking_for_backups_once_a_minute(self):
+        for period in (None, "1m0s", "30s"):
+            self.ready_to_check()
+            velero_ready(self.kubes["target"], read_only=True, sync_period=period)
+
+            _, checks = self.check(method="velero")
+
+            location = checks[("storage_location", "target")]
+            self.assertEqual(location["status"], "warning", period)
+            self.assertIn("Set backupSyncPeriod to 10s", location["detail"])
+
+        velero_ready(self.kubes["target"], read_only=True, sync_period="5s")
+        _, checks = self.check(method="velero")
+        self.assertEqual(checks[("storage_location", "target")]["status"], "ok")
+
     def test_unavailable_storage_location(self):
         self.ready_to_check()
         self.kubes["target"].responses[f"{VELERO}/backupstoragelocations/default"]["status"]["phase"] = "Unavailable"
@@ -733,7 +889,8 @@ class MoveSetupTests(MoveTestCase):
 
     def test_access_names_what_is_denied(self):
         self.ready_to_check()
-        self.kubes["target"].allowed = {("get", "backupstoragelocations"), ("get", "deployments")}
+        self.kubes["target"].allowed = {("get", "backupstoragelocations"), ("get", "deployments"),
+                                        ("list", "datadownloads"), ("list", "events")}
 
         _, checks = self.check(method="velero")
 

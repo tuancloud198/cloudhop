@@ -75,9 +75,10 @@ export function veleroInstall({ bucket, secretFile, pluginVersion = GCP_PLUGIN_V
 // Velero only snapshots volumes through CSI, and so copies their data, with --features=EnableCSI:
 // https://velero.io/docs/main/csi/
 
-// The target only reads the backups the source wrote
+// The target only reads the backups the source wrote, and looks for new ones every 10 seconds
+// instead of every minute, so a move's restore starts sooner
 export const READ_ONLY_LOCATION = `kubectl -n velero patch backupstoragelocation default \\
-  --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'`
+  --type merge -p '{"spec":{"accessMode":"ReadOnly","backupSyncPeriod":"10s"}}'`
 
 export const SNAPSHOT_CLASS = `apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
@@ -188,6 +189,13 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get"]
+  # Tell why a volume copy is stuck, and cancel one that cannot go on
+  - apiGroups: ["velero.io"]
+    resources: ["datauploads", "datadownloads"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
 ---
 ${binding('RoleBinding', 'cloudhop-mover', uniqueId, 'cloudhop-mover', 'velero')}`
 }
