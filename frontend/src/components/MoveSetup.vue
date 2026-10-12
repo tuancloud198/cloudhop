@@ -172,7 +172,8 @@ function veleroSteps() {
       scope: 'target',
       title: `Set up the target cluster ${t.cluster}`,
       where: where(t),
-      text: 'Install Velero on the same bucket, read-only, and allow CloudHop to start restores'
+      text: 'Install Velero on the same bucket, read-only and looking for new backups every 10 seconds, and '
+        + 'allow CloudHop to start restores'
         + `${cutover.value ? ' and scale workloads up' : ''}, with the same key as the source.`,
       code: [
         `# Point kubectl at the target cluster\n${getCredentials(t)}`,
@@ -180,7 +181,8 @@ function veleroSteps() {
         `# Install Velero in this cluster, the destination: it finds the source's backup in the same\n`
           + `# bucket, gs://${bucket.value}, and restores it here\n`
           + veleroInstall({ bucket: bucket.value, secretFile: '"$KEY"' }),
-        `# Read the backups the source writes, never write to the bucket\n${READ_ONLY_LOCATION}`,
+        `# Read the backups the source writes, never write to the bucket, and look for new ones every 10s\n`
+          + READ_ONLY_LOCATION,
         `# CloudHop's access, bound to ${t.accountName}'s service account\n${kubectlApply(moverRole(t.uniqueId))}`,
         '# Should say Available\nvelero backup-location get',
       ].join('\n\n'),

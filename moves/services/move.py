@@ -1,11 +1,13 @@
 import logging
 import re
+import secrets
 from contextlib import contextmanager
 from datetime import timedelta
 
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from clusters.models.cluster import Clusters
 from common.cloud.errors import CloudAPIError
@@ -53,6 +55,16 @@ GCP_PLUGIN = "velero/velero-plugin-for-gcp"
 # Velero only takes CSI snapshots, which snapshotMoveData copies into the bucket, with this feature
 CSI_FEATURE = "EnableCSI"
 VERSION = re.compile(r"v?(\d+)\.(\d+)")
+
+# Velero copies each volume's data with a DataUpload (backup) or a DataDownload (restore), each run
+# by a pod in Velero's namespace on a disk of its own, both named like it. They are v2alpha1 objects.
+VELERO_V2 = f"/apis/velero.io/v2alpha1/namespaces/{VELERO_NAMESPACE}"
+TRANSFERS = {"datauploads": "velero.io/backup-name", "datadownloads": "velero.io/restore-name"}
+TRANSFER_DONE = ("Completed", "Failed", "Canceled")
+# A new copy's pod waits a few seconds for its disk, with warnings; only older ones are shown
+STUCK_AFTER = timedelta(minutes=2)
+# A provider refusing a disk this way does not change by waiting
+QUOTA = re.compile(r"Quota '([^']+)' exceeded\.\s*Limit: ([\d.]+) in region ([\w-]+)")
 
 # Velero Backup and Restore phases that end them without success
 FAILED_PHASES = {"Failed", "FailedValidation", "PartiallyFailed"}
@@ -440,7 +452,13 @@ def _back_up(move: Move) -> str:
     """Back up every object and volume of the namespaces into the bucket."""
     with _kube(move.source_cluster) as kube:
         if not move.backup_name:
-            name = f"cloudhop-move-{move.pk}-{move.attempt}"
+            # Saved before the backup is created, so a later run finds it and never starts a second one
+            move.backup_name = _velero_name(move)
+            move.save(update_fields=["backup_name", "updated_at"])
+        backup = _get_or_none(kube, f"{VELERO}/backups/{move.backup_name}")
+        copies = ""
+        if backup is None:
+            name = move.backup_name
             _create(kube, f"{VELERO}/backups", {
                 "apiVersion": "velero.io/v1",
                 "kind": "Backup",
@@ -453,16 +471,17 @@ def _back_up(move: Move) -> str:
                     "ttl": BACKUP_TTL,
                 },
             })
-            move.backup_name = name
-            move.save(update_fields=["backup_name", "updated_at"])
             _log(move, f"Started Velero backup {name} in the source")
+            backup = {}
 
-        backup = kube.get(f"{VELERO}/backups/{move.backup_name}")
         status = backup.get("status") or {}
         phase = status.get("phase") or "New"
         if phase == "Completed":
             claims = sum(len(kube.list(f"/api/v1/namespaces/{namespace}/persistentvolumeclaims"))
                          for namespace in move.namespaces)
+            copied_bytes = _transferred(_transfers(kube, "datauploads", move.backup_name))[1] if claims else 0
+        elif phase not in FAILED_PHASES:
+            copies = _transfer_status(kube, "datauploads", move.backup_name, "source")
 
     if phase == "Completed":
         # Each volume's data is copied by an operation of its own (a DataUpload); without them the
@@ -476,7 +495,8 @@ def _back_up(move: Move) -> str:
                 f"velero backup describe {move.backup_name} --details"
             )
         progress = status.get("progress") or {}
-        volumes = f", data of {copied} volume{'s' if copied != 1 else ''}" if claims else ""
+        size = f" ({_size(copied_bytes)})" if copied_bytes else ""
+        volumes = f", data of {copied} volume{'s' if copied != 1 else ''}{size}" if claims else ""
         _log(move, f"Backup {move.backup_name} completed: {progress.get('itemsBackedUp', '?')} objects{volumes}")
         return DONE
     if phase in FAILED_PHASES:
@@ -485,7 +505,7 @@ def _back_up(move: Move) -> str:
             f"Velero backup {move.backup_name} ended {phase}: {reason}. "
             f"For details run in the source cluster: velero backup logs {move.backup_name}"
         )
-    move.waiting_on = f"Backup {phase}{_progress(status.get('progress'))}"
+    move.waiting_on = f"Backup {phase}{_progress(status.get('progress'))}{copies}"
     return WAIT
 
 
@@ -499,9 +519,16 @@ def _restore(move: Move) -> str:
                 move.waiting_on = f"The target's Velero has not found backup {move.backup_name} in the bucket yet"
                 return WAIT
 
+            # Saved before the restore is created, so a later run finds it and never starts a second one
+            move.restore_name = _velero_name(move)
+            move.save(update_fields=["restore_name", "updated_at"])
+
+        restore = _get_or_none(kube, f"{VELERO}/restores/{move.restore_name}")
+        copies = ""
+        if restore is None:
             if move.storage_class_mapping:
                 _write_storage_class_config(kube, move.storage_class_mapping)
-            name = f"cloudhop-move-{move.pk}-{move.attempt}"
+            name = move.restore_name
             _create(kube, f"{VELERO}/restores", {
                 "apiVersion": "velero.io/v1",
                 "kind": "Restore",
@@ -513,14 +540,14 @@ def _restore(move: Move) -> str:
                     "existingResourcePolicy": "none",
                 },
             })
-            move.restore_name = name
-            move.save(update_fields=["restore_name", "updated_at"])
             _log(move, f"Started Velero restore {name} in the target")
+            restore = {}
 
-        restore = kube.get(f"{VELERO}/restores/{move.restore_name}")
+        status = restore.get("status") or {}
+        phase = status.get("phase") or "New"
+        if phase not in ("Completed", *FAILED_PHASES):
+            copies = _transfer_status(kube, "datadownloads", move.restore_name, "target")
 
-    status = restore.get("status") or {}
-    phase = status.get("phase") or "New"
     if phase == "Completed":
         if status.get("warnings"):
             _log(move, f"Restore {move.restore_name} completed with {status['warnings']} warnings. To see them run "
@@ -537,7 +564,7 @@ def _restore(move: Move) -> str:
             f"Velero restore {move.restore_name} ended {phase}: {reason}. "
             f"For details run in the target cluster: velero restore logs {move.restore_name}"
         )
-    move.waiting_on = f"Restore {phase}{_progress(status.get('progress'))}"
+    move.waiting_on = f"Restore {phase}{_progress(status.get('progress'))}{copies}"
     return WAIT
 
 
@@ -609,10 +636,10 @@ def _get_or_none(kube: KubeClient, path: str) -> dict | None:
         raise
 
 
-def _list_or_empty(kube: KubeClient, path: str) -> list[dict]:
+def _list_or_empty(kube: KubeClient, path: str, params: dict | None = None) -> list[dict]:
     """List a path whose API may not be installed (404)."""
     try:
-        return kube.list(path)
+        return kube.list(path, params)
     except KubeAPIError as exc:
         if exc.status_code == 404:
             return []
@@ -759,6 +786,98 @@ def _describe(item: dict, kind: str | None = None) -> str:
     metadata = item.get("metadata", {})
     name = f"{metadata['namespace']}/{metadata['name']}" if metadata.get("namespace") else metadata.get("name", "?")
     return f"{kind} {name}" if kind else name
+
+
+def _transfers(kube: KubeClient, kind: str, owner: str) -> list[dict]:
+    """The volume copies (kind: datauploads or datadownloads) of a backup or restore."""
+    return _list_or_empty(kube, f"{VELERO_V2}/{kind}", {"labelSelector": f"{TRANSFERS[kind]}={owner}"})
+
+
+def _transfer_status(kube: KubeClient, kind: str, owner: str, side: str) -> str:
+    """How far the volume copies of a backup or restore are, and why any is stuck, from the
+    warnings on their pods and disks: text to add to what the step waits on.
+
+    Raises MoveError, after cancelling the stuck copies, when the provider refuses them a disk
+    for lack of quota.
+    """
+    transfers = _transfers(kube, kind, owner)
+    stuck = [item for item in transfers if (item.get("status") or {}).get("phase") not in TRANSFER_DONE]
+    done, total = _transferred(transfers)
+    if total:
+        progress = f", volume data {_size(done)} of {_size(total)}"
+    elif stuck:
+        # Velero learns a volume's size once its copy starts
+        progress = f", preparing to copy {len(stuck)} volume{'s' if len(stuck) != 1 else ''}"
+    else:
+        progress = ""
+
+    problems = []
+    for item in stuck:
+        name = item["metadata"]["name"]
+        warnings = [
+            event for event in _list_or_empty(kube, f"/api/v1/namespaces/{VELERO_NAMESPACE}/events",
+                                              {"fieldSelector": f"involvedObject.name={name}"})
+            if event.get("type") == "Warning"
+        ]
+        if not warnings:
+            continue
+        volume = _transfer_volume(item)
+        # The pod's own warning (its disk not there yet) can be newer than the disk's real one
+        quota = next(filter(None, (QUOTA.search(event.get("message", "")) for event in warnings)), None)
+        created = parse_datetime(item["metadata"].get("creationTimestamp") or "")
+        if not quota and created and timezone.now() - created < STUCK_AFTER:
+            continue
+        if quota:
+            for other in stuck:
+                _cancel_transfer(kube, kind, other["metadata"]["name"])
+            raise MoveError(
+                f"The {side} cluster's provider refused a disk for copying volume {volume}: quota {quota[1]} is "
+                f"used up (limit {quota[2]} in {quota[3]}). CloudHop cancelled Velero's copy. Free some of that "
+                f"quota, raise it, or map the volume's storage class to one on other disks, then retry."
+            )
+        latest = max(warnings, key=lambda event: event.get("lastTimestamp") or event.get("eventTime") or "")
+        problems.append(f"{volume}: {latest.get('reason', 'Warning')}: {latest.get('message', '')[:300]}")
+    return progress + (f". Volume copy stuck: {'; '.join(problems)}" if problems else "")
+
+
+def _transferred(transfers: list[dict]) -> tuple[int, int]:
+    """Bytes copied so far, and to copy, by these DataUploads or DataDownloads."""
+    progress = [(item.get("status") or {}).get("progress") or {} for item in transfers]
+    return sum(p.get("bytesDone", 0) for p in progress), sum(p.get("totalBytes", 0) for p in progress)
+
+
+def _size(count: int) -> str:
+    """Bytes as Kubernetes sizes them, e.g. 4.0 GiB."""
+    for unit, power in (("TiB", 40), ("GiB", 30), ("MiB", 20), ("KiB", 10)):
+        if count >= 1 << power:
+            return f"{count / (1 << power):.1f} {unit}"
+    return f"{count} B"
+
+
+def _transfer_volume(item: dict) -> str:
+    """namespace/claim of the volume a DataUpload or DataDownload copies."""
+    spec = item.get("spec") or {}
+    if "targetVolume" in spec:
+        target = spec["targetVolume"]
+        return f"{target.get('namespace')}/{target.get('pvc')}"
+    return f"{spec.get('sourceNamespace')}/{spec.get('sourcePVC')}"
+
+
+def _cancel_transfer(kube: KubeClient, kind: str, name: str) -> None:
+    """Ask Velero to stop a volume copy; it deletes its pod and disk. Best effort."""
+    try:
+        kube.patch(f"{VELERO_V2}/{kind}/{name}", {"spec": {"cancel": True}})
+    except KubeAPIError as exc:
+        logger.warning("Could not cancel Velero %s %s: %s", kind, name, exc)
+
+
+def _velero_name(move: Move) -> str:
+    """A name for the move's next Velero backup or restore.
+
+    The random end keeps it apart from what an earlier move of the same number left in the
+    clusters: numbers start over with a new database, and another CloudHop may share the clusters.
+    """
+    return f"cloudhop-move-{move.pk}-{move.attempt}-{secrets.token_hex(3)}"
 
 
 def _image_tag(image: str) -> tuple[str, str]:

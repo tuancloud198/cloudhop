@@ -1,3 +1,4 @@
+import re
 from contextlib import contextmanager
 
 from clusters.models.cluster import Clusters
@@ -12,6 +13,10 @@ from moves.services.move import GCP_PLUGIN, VELERO, VELERO_NAMESPACE, read_veler
 OK, MISSING, WARNING, UNKNOWN = "ok", "missing", "warning", "unknown"
 
 ACCESS_REVIEW = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews"
+# How often the target's Velero should look for new backups in the bucket; a move's restore waits
+# for it to find the backup. Velero's own default is a minute.
+SYNC_PERIOD = 10
+DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(h|ms|m|s)")
 SNAPSHOT_CLASS_LABEL = "velero.io/csi-volumesnapshot-class"
 
 # What CloudHop does in each cluster during a move, as (verb, group, resource[/subresource], namespace)
@@ -20,12 +25,16 @@ NEEDS = {
     (Move.Method.VELERO, "source"): [
         ("create", "velero.io", "backups", VELERO_NAMESPACE),
         ("get", "apps", "deployments", VELERO_NAMESPACE),
+        ("list", "velero.io", "datauploads", VELERO_NAMESPACE),
+        ("list", "", "events", VELERO_NAMESPACE),
         ("get", "velero.io", "backupstoragelocations", VELERO_NAMESPACE),
         ("list", "snapshot.storage.k8s.io", "volumesnapshotclasses", ""),
     ],
     (Move.Method.VELERO, "target"): [
         ("create", "velero.io", "restores", VELERO_NAMESPACE),
         ("get", "apps", "deployments", VELERO_NAMESPACE),
+        ("list", "velero.io", "datadownloads", VELERO_NAMESPACE),
+        ("list", "", "events", VELERO_NAMESPACE),
         ("get", "velero.io", "backupstoragelocations", VELERO_NAMESPACE),
         ("create", "", "configmaps", VELERO_NAMESPACE),
     ],
@@ -140,6 +149,11 @@ def _check_velero(kube: KubeClient, side: str, name: str, checks: list, versions
         _add(checks, "storage_location", side, WARNING,
              f"Storage location {name} is Available on {where}, but not read-only, so the target's Velero "
              f"could also write to the bucket.")
+    elif side == "target" and _seconds(location["spec"].get("backupSyncPeriod")) > SYNC_PERIOD:
+        period = location["spec"].get("backupSyncPeriod") or "1m (Velero's default)"
+        _add(checks, "storage_location", side, WARNING,
+             f"Storage location {name} is Available on {where} (read-only), but looks for new backups every "
+             f"{period}, so a move waits that long to restore. Set backupSyncPeriod to {SYNC_PERIOD}s.")
     else:
         read_only = " (read-only)" if side == "target" else ""
         _add(checks, "storage_location", side, OK, f"Storage location {name} is Available on {where}{read_only}.")
@@ -281,6 +295,14 @@ def _get(kube: KubeClient, path: str) -> dict | None:
         if exc.status_code == 404:
             return None
         raise
+
+
+def _seconds(duration: str | None) -> float:
+    """Seconds in a Kubernetes duration like "1m0s" or "10s"; no duration is Velero's default, a minute."""
+    if not duration:
+        return 60
+    units = {"h": 3600, "m": 60, "s": 1, "ms": 0.001}
+    return sum(float(amount) * units[unit] for amount, unit in DURATION_PART.findall(duration))
 
 
 def _gs_url(storage: dict) -> str:

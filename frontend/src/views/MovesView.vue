@@ -7,7 +7,7 @@ import MoveSetup from '/src/components/MoveSetup.vue'
 import { accounts } from '../accounts.js'
 import { api } from '../api.js'
 import { METHOD_LABELS, STEP_LABELS, movableNamespace, statusTone } from '../moves.js'
-import { dateTime, timeAgo } from '../format.js'
+import { bytes, dateTime, quantityBytes, timeAgo } from '../format.js'
 import { notify } from '../toasts.js'
 
 const route = useRoute()
@@ -34,6 +34,8 @@ const form = reactive({
 const sourceNamespaces = ref([])
 // Storage class of each source PVC, by namespace, from the last resource sync
 const claimClasses = ref({})
+// Size of each source PVC in bytes, by namespace, from the last resource sync
+const claimSizes = ref({})
 const loadingSource = ref(false)
 const creating = ref(false)
 const formError = ref(null)
@@ -49,6 +51,11 @@ const targetCluster = computed(() => clusters.value.find((cluster) => cluster.id
 const storageClasses = computed(() => velero.value ? [
   ...new Set(form.namespaces.flatMap((namespace) => claimClasses.value[namespace] ?? [])),
 ].sort() : [])
+// What a Velero move copies at most: it copies what the volumes hold, not their whole size
+const volumeEstimate = computed(() => {
+  const sizes = form.namespaces.flatMap((namespace) => claimSizes.value[namespace] ?? [])
+  return { count: sizes.length, bytes: sizes.reduce((sum, size) => sum + size, 0) }
+})
 const canCreate = computed(() => form.source && form.target && form.namespaces.length && !creating.value)
 
 loadMoves()
@@ -86,6 +93,7 @@ async function loadSource() {
   form.mapping = {}
   sourceNamespaces.value = []
   claimClasses.value = {}
+  claimSizes.value = {}
   if (!form.source) return
   if (form.target === form.source) form.target = null
   loadingSource.value = true
@@ -96,11 +104,16 @@ async function loadSource() {
     ])
     sourceNamespaces.value = summary.namespaces.filter(movableNamespace)
     const classes = {}
+    const sizes = {}
     for (const claim of claims.results) {
       const name = claim.manifest.spec?.storageClassName
       if (name) (classes[claim.namespace] ??= []).push(name)
+      // A bound claim's real size, else what it asks for
+      const size = claim.status?.capacity?.storage ?? claim.manifest.spec?.resources?.requests?.storage
+      ;(sizes[claim.namespace] ??= []).push(quantityBytes(size))
     }
     claimClasses.value = classes
+    claimSizes.value = sizes
   } catch (error) {
     notify(`Could not read the source cluster's namespaces: ${error.message}`, 'error')
   } finally {
@@ -218,6 +231,16 @@ function clusterLabel(cluster) {
             </label>
           </div>
           <span class="muted small">The target cluster must not have these namespaces yet.</span>
+          <div v-if="velero && volumeEstimate.count" class="estimate">
+            <strong>
+              {{ volumeEstimate.count }} volume{{ volumeEstimate.count === 1 ? '' : 's' }},
+              {{ bytes(volumeEstimate.bytes) }} in all
+            </strong>
+            <span class="muted small">
+              Velero copies only the data stored in them, so at most this; the move shows the real amount as it
+              copies. Sizes are from the source's last resource refresh.
+            </span>
+          </div>
         </fieldset>
 
         <fieldset class="field">
@@ -422,6 +445,16 @@ legend {
 
 .choice.block input {
   margin-top: 4px;
+}
+
+.estimate {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--surface-muted);
 }
 
 .mapping {
