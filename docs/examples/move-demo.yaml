@@ -1,0 +1,93 @@
+# A namespace with a volume full of sample data, for trying a Velero move.
+#
+# Before the move, in the source cluster:
+#   kubectl apply -f docs/examples/move-demo.yaml
+#   kubectl -n move-demo rollout status deploy/data
+#   kubectl -n move-demo exec deploy/data -- cat /data/seeded.txt
+# then use Refresh resources on the source cluster in CloudHop, so move-demo shows up in the form.
+#
+# After the move, in the target cluster, every file should say OK, and seeded.txt should show the
+# time the SOURCE was seeded. A later time means the target's volume came up empty and was seeded
+# again: no data was copied. Do not go by the pod name in it: Velero restores the pod under its old name.
+#   kubectl -n move-demo rollout status deploy/data
+#   kubectl -n move-demo exec deploy/data -- sh -c 'cd /data && sha256sum -c SHA256SUMS && cat seeded.txt'
+#   kubectl -n move-demo logs deploy/data -c seed          # "already seeded" after a real copy
+#   kubectl -n move-demo exec deploy/data -- head -n 3 /data/heartbeat.log   # starts at the source's time
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: move-demo
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data
+  namespace: move-demo
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # GKE's PD CSI class, which Velero can snapshot; the target needs a class of this name too
+  storageClassName: standard-rwo
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data
+  namespace: move-demo
+spec:
+  replicas: 1
+  # The volume is ReadWriteOnce: stop the old pod before starting a new one
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: data
+  template:
+    metadata:
+      labels:
+        app: data
+    spec:
+      initContainers:
+        # Writes 20 MiB of random files and their checksums, once: a restored volume already has them
+        - name: seed
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              if [ -f /data/SHA256SUMS ]; then
+                echo "already seeded: $(cat /data/seeded.txt)"
+                exit 0
+              fi
+              mkdir -p /data/files
+              for i in $(seq 1 20); do
+                head -c 1048576 /dev/urandom > /data/files/blob-$i.bin
+              done
+              echo "seeded $(date -u +%Y-%m-%dT%H:%M:%SZ) by pod $(hostname)" > /data/seeded.txt
+              cd /data && sha256sum seeded.txt files/* > SHA256SUMS
+              echo "seeded: $(cat /data/seeded.txt)"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        # Appends a line every 10 seconds, so the last lines show when the source stopped writing
+        - name: heartbeat
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - while true; do echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $(hostname)" >> /data/heartbeat.log; sleep 10; done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: data

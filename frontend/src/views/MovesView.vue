@@ -3,6 +3,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import AppIcon from '../components/AppIcon.vue'
+import MoveSetup from '/src/components/MoveSetup.vue'
 import { accounts } from '../accounts.js'
 import { api } from '../api.js'
 import { METHOD_LABELS, STEP_LABELS, movableNamespace, statusTone } from '../moves.js'
@@ -18,7 +19,7 @@ const loadError = ref(null)
 
 // Every active cluster of every account, for choosing the source and target
 const clusters = ref([])
-const showForm = ref(Boolean(route.query.source))
+const showForm = ref(Boolean(route.query.source || route.query.new))
 const form = reactive({
   source: route.query.source ? Number(route.query.source) : null,
   target: null,
@@ -43,6 +44,8 @@ const byAccount = computed(() =>
     .filter((group) => group.clusters.length),
 )
 const velero = computed(() => form.method === 'velero')
+const sourceCluster = computed(() => clusters.value.find((cluster) => cluster.id === form.source))
+const targetCluster = computed(() => clusters.value.find((cluster) => cluster.id === form.target))
 const storageClasses = computed(() => velero.value ? [
   ...new Set(form.namespaces.flatMap((namespace) => claimClasses.value[namespace] ?? [])),
 ].sort() : [])
@@ -262,6 +265,17 @@ function clusterLabel(cluster) {
           </label>
         </fieldset>
 
+        <fieldset v-if="sourceCluster && targetCluster" class="field">
+          <legend>Setup</legend>
+          <MoveSetup
+            :source="sourceCluster"
+            :target="targetCluster"
+            :method="form.method"
+            :mode="form.mode"
+            :storage-location="form.storageLocation"
+          />
+        </fieldset>
+
         <fieldset v-if="storageClasses.length" class="field">
           <legend>Storage classes</legend>
           <span class="muted small">The class each volume gets in the target. Keep the name if the target has it.</span>
@@ -376,6 +390,8 @@ function clusterLabel(cluster) {
 }
 
 fieldset {
+  /* Fieldsets are as wide as their content by default; code blocks scroll instead */
+  min-width: 0;
   margin: 0;
   padding: 0;
   border: none;

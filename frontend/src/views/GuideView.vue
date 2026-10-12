@@ -6,6 +6,16 @@ import AppIcon from '../components/AppIcon.vue'
 import CodeBlock from '../components/CodeBlock.vue'
 import ProviderLogo from '../components/ProviderLogo.vue'
 import { accounts } from '../accounts.js'
+import {
+  READ_ONLY_LOCATION,
+  SNAPSHOT_CLASS,
+  bucketCommands,
+  manifestTargetRole as buildManifestTargetRole,
+  moverRole as buildMoverRole,
+  scalerRole,
+  secretReaderRole,
+  veleroInstall,
+} from '/src/moveSetup.js'
 
 defineEmits(['add-account'])
 
@@ -116,29 +126,7 @@ gcloud billing accounts add-iam-policy-binding BILLING_ACCOUNT_ID \\
 const findUniqueId = `gcloud iam service-accounts describe ${SERVICE_ACCOUNT} \\
   --format 'value(uniqueId)'`
 
-const secretReader = computed(() => `apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cloudhop-secret-reader
-rules:
-  - apiGroups: [""]
-    resources: ["secrets"]
-    verbs: ["get", "list"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cloudhop-secret-reader
-subjects:
-  # The service account's numeric unique ID, not its email
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: cloudhop-secret-reader
-  apiGroup: rbac.authorization.k8s.io
-`)
+const secretReader = computed(() => secretReaderRole(uniqueId.value))
 
 const applySecretReader = computed(() => `gcloud container clusters get-credentials CLUSTER_NAME \\
   --location LOCATION \\
@@ -146,172 +134,29 @@ const applySecretReader = computed(() => `gcloud container clusters get-credenti
 
 kubectl apply -f cloudhop-secret-reader.yaml`)
 
-// Manifests-only moves: the target creates the namespaces and applies every object in them
-const manifestTargetRole = computed(() => `# Target cluster: create the moved namespaces and apply their objects
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cloudhop-manifest-mover
-rules:
-  - apiGroups: [""]
-    resources: ["namespaces"]
-    verbs: ["get", "create", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cloudhop-manifest-mover
-subjects:
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: cloudhop-manifest-mover
-  apiGroup: rbac.authorization.k8s.io
----
-# Kubernetes' built-in "admin" role: create and update the objects inside namespaces
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cloudhop-manifest-admin
-subjects:
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: admin
-  apiGroup: rbac.authorization.k8s.io
-`)
-
-const manifestSourceRole = computed(() => `# Source cluster, cutover only: scale the workloads to 0 once the target runs them
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cloudhop-scaler
-rules:
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cloudhop-scaler
-subjects:
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: cloudhop-scaler
-  apiGroup: rbac.authorization.k8s.io
-`)
+const manifestTargetRole = computed(() => buildManifestTargetRole(uniqueId.value))
+const manifestSourceRole = computed(() => scalerRole(uniqueId.value))
 
 // Moves: TARGET_PROJECT is left for the user, since fill() only knows the selected account
-const moveBucket = `# In the target account's project: the bucket, and the account Velero uses for it
-gcloud storage buckets create gs://BUCKET \\
-  --project TARGET_PROJECT \\
-  --location REGION \\
-  --uniform-bucket-level-access
+const moveBucket = `# In the target account's project: the bucket, for CloudHop's service account there
+${bucketCommands({
+  project: 'TARGET_PROJECT',
+  bucket: 'BUCKET',
+  region: 'REGION',
+  member: 'cloudhop@TARGET_PROJECT.iam.gserviceaccount.com',
+})}`
 
-gcloud iam service-accounts create velero \\
-  --project TARGET_PROJECT \\
-  --display-name "Velero for CloudHop moves"
-
-gcloud storage buckets add-iam-policy-binding gs://BUCKET \\
-  --member serviceAccount:velero@TARGET_PROJECT.iam.gserviceaccount.com \\
-  --role roles/storage.objectAdmin
-
-gcloud iam service-accounts keys create velero-key.json \\
-  --iam-account velero@TARGET_PROJECT.iam.gserviceaccount.com`
-
-const installVelero = `# In each cluster, source and target, with kubectl pointing at it
-velero install \\
-  --provider gcp \\
-  --plugins velero/velero-plugin-for-gcp:PLUGIN_VERSION \\
-  --bucket BUCKET \\
-  --secret-file ./velero-key.json \\
-  --use-node-agent \\
-  --use-volume-snapshots=false
+const installVelero = `# In each cluster, source and target, with kubectl pointing at it.
+# The key is the target account's CloudHop key in both.
+${veleroInstall({ bucket: 'BUCKET', secretFile: './cloudhop-key.json', pluginVersion: 'PLUGIN_VERSION' })}
 
 # In the target only: read the bucket, never write to it
-kubectl -n velero patch backupstoragelocation default \\
-  --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'
+${READ_ONLY_LOCATION}
 
 # Both should say Available
 velero backup-location get`
 
-const snapshotClass = `apiVersion: snapshot.storage.k8s.io/v1
-kind: VolumeSnapshotClass
-metadata:
-  name: velero-pd
-  labels:
-    # Velero takes CSI snapshots with the class carrying this label
-    velero.io/csi-volumesnapshot-class: "true"
-driver: pd.csi.storage.gke.io
-# The snapshot is only needed until Velero has copied it to the bucket
-deletionPolicy: Delete
-`
-
-const moverRole = computed(() => `apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: cloudhop-mover
-rules:
-  - apiGroups: ["velero.io"]
-    resources: ["backups", "restores"]
-    verbs: ["get", "list", "create"]
-  - apiGroups: ["velero.io"]
-    resources: ["backupstoragelocations"]
-    verbs: ["get", "list"]
-  - apiGroups: ["snapshot.storage.k8s.io"]
-    resources: ["volumesnapshotclasses"]
-    verbs: ["get", "list"]
-  # Cutover: scale the source down and the target up
-  - apiGroups: ["apps"]
-    resources: ["deployments/scale", "statefulsets/scale"]
-    verbs: ["get", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: cloudhop-mover
-subjects:
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: ClusterRole
-  name: cloudhop-mover
-  apiGroup: rbac.authorization.k8s.io
----
-# Storage class renames for Velero's restores, in its namespace only
-apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
-metadata:
-  name: cloudhop-mover
-  namespace: velero
-rules:
-  - apiGroups: [""]
-    resources: ["configmaps"]
-    verbs: ["get", "create", "patch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: cloudhop-mover
-  namespace: velero
-subjects:
-  - kind: User
-    name: "${uniqueId.value}"
-    apiGroup: rbac.authorization.k8s.io
-roleRef:
-  kind: Role
-  name: cloudhop-mover
-  apiGroup: rbac.authorization.k8s.io
-`)
+const moverRole = computed(() => buildMoverRole(uniqueId.value))
 
 // The page scrolls inside .main, not the window, so the router cannot jump to #anchors itself
 async function scrollToHash() {
@@ -702,6 +547,11 @@ watch(() => route.hash, scrollToHash)
             Either way, <strong>cutover</strong> scales the source's workloads to 0 and <strong>keep running</strong>
             leaves them alone. The source is never deleted.
           </p>
+          <p>
+            The steps below use placeholders. Once you pick a source and target cluster under
+            <RouterLink :to="{ name: 'moves', query: { new: 1 } }">New move</RouterLink>, the form shows the same
+            steps filled in for those two clusters, and checks which of them are done.
+          </p>
 
           <h3>Manifests only</h3>
           <p>
@@ -745,26 +595,32 @@ watch(() => route.hash, scrollToHash)
           </p>
           <ol class="steps">
             <li>
-              <strong>Create the bucket and Velero's service account</strong> in the target project. Use a region
-              close to both clusters; copying out of the source's region is billed to the source.
+              <strong>Create the bucket</strong> in the target project, and let CloudHop's service account there
+              use it. Use a region close to both clusters; copying out of the source's region is billed to the
+              source.
               <CodeBlock :code="moveBucket" label="shell" />
               <p class="muted small">
-                Keep <code>velero-key.json</code> out of git, like CloudHop's own key.
+                Velero reuses that service account and its key (<code>cloudhop-key.json</code>), in both clusters.
+                The key ends up as a Secret in each, so anyone who can read Secrets there can use it, for everything
+                the account may do. A service account of its own, with only <code>roles/storage.objectAdmin</code> on
+                the bucket, limits that to the bucket.
               </p>
             </li>
             <li>
               <strong>Install Velero in both clusters</strong> with the
               <a href="https://velero.io/docs/main/basic-install/" target="_blank" rel="noopener">Velero CLI</a>,
-              version 1.14 or later. Pick <code>PLUGIN_VERSION</code> from the
+              version 1.14 or later, the same in both clusters: the CLI installs its own version. Pick
+              <code>PLUGIN_VERSION</code> from the
               <a href="https://github.com/vmware-tanzu/velero-plugin-for-gcp#compatibility" target="_blank" rel="noopener">
-                GCP plugin's compatibility table</a> for your Velero version. Both clusters use the same bucket; the
-              target's storage location is made read-only.
+                GCP plugin's compatibility table</a> for your Velero version (v1.14.x for Velero 1.18). Keep
+              <code>--features=EnableCSI</code>: without it Velero copies no volume data, and its backups still
+              complete. Both clusters use the same bucket; the target's storage location is made read-only.
               <CodeBlock :code="installVelero" label="shell" />
             </li>
             <li>
               <strong>Let Velero snapshot volumes in the source cluster.</strong> Velero snapshots each volume, copies
               the snapshot's files into the bucket, then deletes the snapshot.
-              <CodeBlock :code="snapshotClass" label="velero-snapshot-class.yaml" />
+              <CodeBlock :code="SNAPSHOT_CLASS" label="velero-snapshot-class.yaml" />
             </li>
             <li>
               <strong>Allow CloudHop to run moves</strong> in both clusters: create Velero backups and restores, and

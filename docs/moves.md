@@ -14,6 +14,8 @@ and a **mode**:
 
 The source is never deleted. Setting up either method is described in the Guide, under *Moving namespaces*.
 
+Once a source and target cluster are picked, the **New move** form lists the setup steps for that pair, with the projects, clusters and service-account IDs filled in, and checks each one: `GET /api/v1/moves/setup/` (`moves/services/setup.py`) reads the bucket with the destination account's credentials (`moves/adapters/`: it must exist in the destination's project; CloudHop needs `roles/storage.legacyBucketReader` on it, and says so when it lacks it), asks both clusters whether Velero and its storage location are ready on that bucket, whether the source has a snapshot class, and, with `SelfSubjectAccessReview`s, whether CloudHop may do what the move will do there. It starts nothing; the move's own check step stays the authority.
+
 ## Manifests only
 
 ```
@@ -44,11 +46,11 @@ Velero's plain snapshot mode would leave the volume data in disk snapshots insid
 
 ### Setup (once, by the user)
 
-In the target project: a bucket, and a service account `velero` with `roles/storage.objectAdmin` on it, whose key Velero uses in both clusters.
+In the target project: a bucket. Velero reuses the target account's CloudHop service account and its key in both clusters, so that account gets `roles/storage.objectAdmin` on the bucket (and `roles/storage.legacyBucketReader`, for CloudHop's check). The key is stored as a Secret in both clusters; a service account of Velero's own, with only bucket access, would expose less if one leaked.
 
 In each cluster:
 
-- Velero 1.14 or later with its node agent and the GCP plugin, storage location `default` on the bucket. The target's is read-only (`accessMode: ReadOnly`).
+- Velero 1.14 or later, the same version in both, with its node agent, `--features=EnableCSI` (without it Velero takes no CSI snapshots, so copies no volume data, and its backups still complete), and the GCP plugin version its compatibility table pairs with that Velero (v1.14.x for 1.18). Storage location `default` on the bucket; the target's is read-only (`accessMode: ReadOnly`).
 - In the source: a `VolumeSnapshotClass` for `pd.csi.storage.gke.io`, labelled `velero.io/csi-volumesnapshot-class: "true"`.
 - RBAC for CloudHop's service account (`cloudhop-mover`): create and read Velero backups and restores, read storage locations and snapshot classes, scale Deployments and StatefulSets, and write ConfigMaps in the `velero` namespace.
 
@@ -59,9 +61,9 @@ pending → checking → [cutover: scaling_down] → backing_up → restoring �
                                          any step → failed (retry from that step) | cancelled
 ```
 
-1. **Checking:** Velero runs in both clusters, both storage locations are `Available` and point at the same bucket and prefix, every namespace exists in the source and not in the target, every storage class the source's volumes use exists in the target (after the mapping), and the source has a snapshot class for Velero.
+1. **Checking:** Velero runs in both clusters with CSI support (when there are volumes) and a GCP plugin matching its version, both storage locations are `Available` and point at the same bucket and prefix, every namespace exists in the source and not in the target, every storage class the source's volumes use exists in the target (after the mapping), and the source has a snapshot class for Velero.
 2. **Scaling down** (cutover only): CloudHop records the replicas of every Deployment and StatefulSet, scales them to 0, and waits for their pods to stop, so nothing writes to the volumes during the backup.
-3. **Backing up:** a Velero `Backup` of the namespaces in the source, with `snapshotMoveData: true` and a 7-day TTL, so a failed restore can be retried.
+3. **Backing up:** a Velero `Backup` of the namespaces in the source, with `snapshotMoveData: true` and a 7-day TTL, so a failed restore can be retried. A backup that completes having copied the data of fewer volumes than the namespaces have (`backupItemOperationsCompleted`) fails the move: Velero without CSI support completes such backups with only a warning, and the restore would give the target empty volumes.
 4. **Restoring:** once the target's Velero has found the backup in the bucket (it lists it every minute by default), a Velero `Restore` in the target. Storage classes the target names differently are renamed through Velero's `change-storage-class-config` ConfigMap.
 5. **Scaling up** (cutover only): the restored workloads, which were backed up at 0, get the replicas recorded in step 2.
 6. **Verifying:** every Deployment and StatefulSet in the target has its replicas ready, and every PVC is bound.
@@ -80,7 +82,7 @@ Each step that waits (pods stopping, Velero working, workloads starting) has a t
 - `moves/models/`: `Move` (clusters, namespaces, method, mode, storage class mapping, status, Velero object names, recorded replicas, timestamps) and `MoveEvent` (the move's log).
 - `moves/services/`: `create_move`, `advance` (runs the current step once), `cancel_move`, `retry_move`. Each step checks what is already done first, so running it again is safe; `advance` locks the move's row so two workers never run the same move at once.
 - `moves/tasks.py`: `advance_move` runs a step and queues itself again, every 15 seconds while a step waits. `resume_moves`, every 5 minutes, queues running moves not checked for 5 minutes, e.g. after the worker restarted.
-- `moves/views/`: `/api/v1/moves/` (list, start), `/api/v1/moves/<id>/` (with its log), `.../cancel/`, `.../retry/`.
+- `moves/views/`: `/api/v1/moves/` (list, start), `/api/v1/moves/setup/` (setup check), `/api/v1/moves/<id>/` (with its log), `.../cancel/`, `.../retry/`.
 - `common/kube/`: `KubeClient` can create (`post`), merge-patch (`patch`) and server-side apply (`apply`) objects.
 - `kubernetes/services/resource.py`: `list_native_resource_types`, `list_custom_resource_types` and `clean_manifest`, shared by the resource sync and manifests-only moves.
 - Frontend: **Moves** in the sidebar (`MovesView`, `MoveView`), and **Move namespaces** on a cluster.

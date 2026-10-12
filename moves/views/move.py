@@ -5,8 +5,11 @@ from rest_framework.views import APIView
 
 from common.cloud.errors import CloudAPIError
 from moves.models.move import Move
-from moves.serializers.move import MoveCreateSerializer, MoveDetailSerializer, MoveSerializer
+from moves.serializers.move import (
+    MoveCreateSerializer, MoveDetailSerializer, MoveSerializer, MoveSetupQuerySerializer,
+)
 from moves.services.move import InvalidMove, cancel_move, create_move, retry_move
+from moves.services.setup import check_setup
 from moves.tasks import advance_move
 
 
@@ -25,6 +28,15 @@ class MoveListView(generics.ListAPIView):
             return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         transaction.on_commit(lambda: advance_move.delay(move.pk))
         return Response(MoveDetailSerializer(move).data, status=status.HTTP_201_CREATED)
+
+
+class MoveSetupView(APIView):
+    """GET: what a move between two clusters needs set up, and whether it is. Starts nothing."""
+
+    def get(self, request):
+        query = MoveSetupQuerySerializer(data=request.query_params)
+        query.is_valid(raise_exception=True)
+        return Response(check_setup(**query.validated_data))
 
 
 class MoveDetailView(generics.RetrieveAPIView):
